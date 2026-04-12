@@ -1,11 +1,18 @@
-//! Slice-2b bench harness: cold vs warm query latency through the
-//! real `NamespaceService` cache-aside path.
+//! Slice-6d bench harness: four-phase cold vs warm query latency
+//! through the real `NamespaceService` cache-aside path.
 //!
 //! Drives traffic entirely in-process (no HTTP) so the numbers
 //! reflect the service layer and the cache — not the axum
-//! extractor stack. The bench itself builds a fresh
-//! `NamespaceService` with a tempdir-backed foyer cache so every
-//! run starts cold and there is nothing to clean up between runs.
+//! extractor stack. The bench builds a fresh `NamespaceService`
+//! with a tempdir-backed foyer cache so every run starts cold.
+//!
+//! **Four phases:**
+//!
+//! 1. Linear scan, cold — fresh namespace, no index
+//! 2. Linear scan, warm — same queries, cache hit
+//! 3. IVF_PQ indexed, cold — new namespace, index built, then
+//!    fresh queries through the indexed table
+//! 4. IVF_PQ indexed, warm — same queries, cache hit
 //!
 //! Run with:
 //!
@@ -15,22 +22,27 @@
 //! FIRNFLOW_S3_ENDPOINT=http://127.0.0.1:9000 \
 //! FIRNFLOW_S3_ACCESS_KEY=minioadmin \
 //! FIRNFLOW_S3_SECRET_KEY=minioadmin \
+//! FIRNFLOW_BENCH_DIM=1536 \
+//! FIRNFLOW_BENCH_ROWS=100000 \
 //!   ./scripts/cargo run --release -p firnflow-bench
 //! ```
 //!
 //! Env vars (all optional except `FIRNFLOW_S3_BUCKET`):
 //!
-//! | var                        | default                         |
-//! | -------------------------- | ------------------------------- |
-//! | `FIRNFLOW_S3_BUCKET`     | *(required)*                     |
-//! | `FIRNFLOW_S3_ENDPOINT`   | (real AWS)                       |
-//! | `FIRNFLOW_S3_ACCESS_KEY` | (default credential chain)       |
-//! | `FIRNFLOW_S3_SECRET_KEY` | (default credential chain)       |
-//! | `FIRNFLOW_S3_REGION`     | `us-east-1`                      |
-//! | `FIRNFLOW_BENCH_DIM`     | `32`                             |
-//! | `FIRNFLOW_BENCH_ROWS`    | `100`                            |
-//! | `FIRNFLOW_BENCH_QUERIES` | `50`                             |
-//! | `FIRNFLOW_BENCH_OUT`     | `bench/results/cold_vs_warm.md` |
+//! | var                             | default                                    |
+//! | ------------------------------- | ------------------------------------------ |
+//! | `FIRNFLOW_S3_BUCKET`            | *(required)*                               |
+//! | `FIRNFLOW_S3_ENDPOINT`          | (real AWS)                                 |
+//! | `FIRNFLOW_S3_ACCESS_KEY`        | (default credential chain)                 |
+//! | `FIRNFLOW_S3_SECRET_KEY`        | (default credential chain)                 |
+//! | `FIRNFLOW_S3_REGION`            | `us-east-1`                                |
+//! | `FIRNFLOW_BENCH_DIM`            | `32`                                       |
+//! | `FIRNFLOW_BENCH_ROWS`           | `100`                                      |
+//! | `FIRNFLOW_BENCH_QUERIES`        | `50`                                       |
+//! | `FIRNFLOW_BENCH_OUT`            | `bench/results/cold_vs_warm_realistic.md`  |
+//! | `FIRNFLOW_BENCH_CACHE_RAM_MB`   | `16`                                       |
+//! | `FIRNFLOW_BENCH_CACHE_NVME_MB`  | `256`                                      |
+//! | `FIRNFLOW_BENCH_INDEX_NPROBES`  | `20`                                       |
 
 use std::collections::HashMap;
 use std::fs;
@@ -49,6 +61,9 @@ struct BenchConfig {
     rows: usize,
     queries: usize,
     out_path: PathBuf,
+    cache_ram_bytes: usize,
+    cache_nvme_bytes: usize,
+    nprobes: usize,
 }
 
 impl BenchConfig {
@@ -66,8 +81,17 @@ impl BenchConfig {
             .context("FIRNFLOW_BENCH_QUERIES")?;
         let out_path = PathBuf::from(env_or(
             "FIRNFLOW_BENCH_OUT",
-            "bench/results/cold_vs_warm.md",
+            "bench/results/cold_vs_warm_realistic.md",
         ));
+        let cache_ram_mb: usize = env_or("FIRNFLOW_BENCH_CACHE_RAM_MB", "16")
+            .parse()
+            .context("FIRNFLOW_BENCH_CACHE_RAM_MB")?;
+        let cache_nvme_mb: usize = env_or("FIRNFLOW_BENCH_CACHE_NVME_MB", "256")
+            .parse()
+            .context("FIRNFLOW_BENCH_CACHE_NVME_MB")?;
+        let nprobes: usize = env_or("FIRNFLOW_BENCH_INDEX_NPROBES", "20")
+            .parse()
+            .context("FIRNFLOW_BENCH_INDEX_NPROBES")?;
 
         let mut opts = HashMap::new();
         if let Ok(v) = std::env::var("FIRNFLOW_S3_ENDPOINT") {
@@ -93,6 +117,9 @@ impl BenchConfig {
             rows,
             queries,
             out_path,
+            cache_ram_bytes: cache_ram_mb * 1024 * 1024,
+            cache_nvme_bytes: cache_nvme_mb * 1024 * 1024,
+            nprobes,
         })
     }
 }
@@ -101,9 +128,6 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-/// Deterministic vector generator. Returns values roughly in
-/// `[-1, 1]` via `sin` so distances between vectors are
-/// non-trivial (all-zero or all-same vectors would be pathological).
 fn make_vector(seed: usize, dim: usize) -> Vec<f32> {
     (0..dim)
         .map(|j| (((seed * 7919 + j * 31) as f32) * 0.001).sin())
@@ -111,7 +135,6 @@ fn make_vector(seed: usize, dim: usize) -> Vec<f32> {
 }
 
 fn make_query_vector(seed: usize, dim: usize) -> Vec<f32> {
-    // Offset seed so query vectors differ from stored row vectors.
     make_vector(seed + 1_000_000, dim)
 }
 
@@ -148,15 +171,9 @@ async fn run_queries(
     Ok(samples)
 }
 
-/// Scrape a single metric value out of a Prometheus exposition
-/// payload. Same shape as the helper in `api_metrics.rs` — kept
-/// local to avoid a shared-utility crate just for one function.
 fn metric_value(body: &str, metric: &str, label_needle: &str) -> Option<f64> {
     for line in body.lines() {
-        if line.starts_with('#') {
-            continue;
-        }
-        if !line.starts_with(metric) {
+        if line.starts_with('#') || !line.starts_with(metric) {
             continue;
         }
         if !label_needle.is_empty() && !line.contains(label_needle) {
@@ -168,16 +185,63 @@ fn metric_value(body: &str, metric: &str, label_needle: &str) -> Option<f64> {
     None
 }
 
-fn fmt_us(d: Duration) -> String {
-    format!("{:>9.2} µs", d.as_secs_f64() * 1_000_000.0)
+fn fmt_dur(d: Duration) -> String {
+    let us = d.as_secs_f64() * 1_000_000.0;
+    if us < 1000.0 {
+        format!("{:>10.2} us", us)
+    } else {
+        let ms = us / 1000.0;
+        if ms < 1000.0 {
+            format!("{:>10.2} ms", ms)
+        } else {
+            format!("{:>10.2} s ", d.as_secs_f64())
+        }
+    }
+}
+
+fn ts_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+}
+
+/// Upsert rows into a namespace. For large row counts, batches the
+/// upserts to avoid building a single enormous Arrow batch in
+/// memory.
+async fn upsert_rows(
+    service: &NamespaceService,
+    ns: &NamespaceId,
+    total_rows: usize,
+    dim: usize,
+) -> anyhow::Result<Duration> {
+    let batch_size = 10_000;
+    let start = Instant::now();
+    let mut offset = 0;
+    while offset < total_rows {
+        let end = (offset + batch_size).min(total_rows);
+        let rows: Vec<(u64, Vec<f32>)> = (offset..end)
+            .map(|i| (i as u64, make_vector(i, dim)))
+            .collect();
+        service.upsert(ns, rows).await?;
+        offset = end;
+    }
+    Ok(start.elapsed())
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = BenchConfig::from_env()?;
     println!(
-        "bench config: dim={}, rows={}, queries={}, bucket={}",
-        cfg.dim, cfg.rows, cfg.queries, cfg.bucket
+        "bench config: dim={}, rows={}, queries={}, nprobes={}, \
+         cache_ram={}MB, cache_nvme={}MB, bucket={}",
+        cfg.dim,
+        cfg.rows,
+        cfg.queries,
+        cfg.nprobes,
+        cfg.cache_ram_bytes / (1024 * 1024),
+        cfg.cache_nvme_bytes / (1024 * 1024),
+        cfg.bucket
     );
 
     let tmp = tempfile::tempdir()?;
@@ -188,108 +252,237 @@ async fn main() -> anyhow::Result<()> {
     ));
     let cache = Arc::new(
         NamespaceCache::new(
-            16 * 1024 * 1024,
+            cfg.cache_ram_bytes,
             tmp.path(),
-            64 * 1024 * 1024,
+            cfg.cache_nvme_bytes,
             Arc::clone(&metrics),
         )
         .await
         .map_err(|e| anyhow::anyhow!("build cache: {e}"))?,
     );
-    let service = NamespaceService::new(manager, cache, Arc::clone(&metrics));
+    let service = NamespaceService::new(Arc::clone(&manager), cache, Arc::clone(&metrics));
 
-    let ns = NamespaceId::new(format!(
-        "bench-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos()
-    ))?;
-
-    // ---- upsert ----
-    println!("upsert phase: {} rows...", cfg.rows);
-    let upsert_start = Instant::now();
-    let rows: Vec<(u64, Vec<f32>)> = (0..cfg.rows)
-        .map(|i| (i as u64, make_vector(i, cfg.dim)))
-        .collect();
-    service.upsert(&ns, rows).await?;
-    let upsert_elapsed = upsert_start.elapsed();
-    println!("  upsert completed in {} ms", upsert_elapsed.as_millis());
-
-    // ---- prepare queries ----
     let queries: Vec<QueryRequest> = (0..cfg.queries)
         .map(|i| QueryRequest {
             vector: make_query_vector(i, cfg.dim),
             k: 10,
-            nprobes: None,
+            nprobes: None, // linear scan phase uses default
         })
         .collect();
 
-    // ---- cold phase ----
-    println!("cold phase: {} queries...", cfg.queries);
-    let cold_samples = run_queries(&service, &ns, &queries).await?;
-    let cold = percentiles(cold_samples.clone());
+    let queries_indexed: Vec<QueryRequest> = (0..cfg.queries)
+        .map(|i| QueryRequest {
+            vector: make_query_vector(i, cfg.dim),
+            k: 10,
+            nprobes: Some(cfg.nprobes),
+        })
+        .collect();
+
+    // ================================================================
+    // Phase 1+2: Linear scan (no index)
+    // ================================================================
+    let ns_linear = NamespaceId::new(format!("bench-linear-{}", ts_nanos()))?;
+    println!("\n--- linear scan namespace: {} ---", ns_linear);
+
+    println!("upsert phase: {} rows...", cfg.rows);
+    let upsert_linear = upsert_rows(&service, &ns_linear, cfg.rows, cfg.dim).await?;
+    println!("  upsert completed in {:.1}s", upsert_linear.as_secs_f64());
+
+    println!("linear cold: {} queries...", cfg.queries);
+    let linear_cold_samples = run_queries(&service, &ns_linear, &queries).await?;
+    let linear_cold = percentiles(linear_cold_samples);
     println!(
-        "  cold: p50={} p95={} p99={} max={}",
-        fmt_us(cold.p50),
-        fmt_us(cold.p95),
-        fmt_us(cold.p99),
-        fmt_us(cold.max)
+        "  p50={} p99={}",
+        fmt_dur(linear_cold.p50),
+        fmt_dur(linear_cold.p99)
     );
 
-    // ---- warm phase ----
-    println!("warm phase: {} queries...", cfg.queries);
-    let warm_samples = run_queries(&service, &ns, &queries).await?;
-    let warm = percentiles(warm_samples.clone());
+    println!("linear warm: {} queries...", cfg.queries);
+    let linear_warm_samples = run_queries(&service, &ns_linear, &queries).await?;
+    let linear_warm = percentiles(linear_warm_samples);
     println!(
-        "  warm: p50={} p95={} p99={} max={}",
-        fmt_us(warm.p50),
-        fmt_us(warm.p95),
-        fmt_us(warm.p99),
-        fmt_us(warm.max)
+        "  p50={} p99={}",
+        fmt_dur(linear_warm.p50),
+        fmt_dur(linear_warm.p99)
     );
 
-    // ---- read metric state ----
+    // ================================================================
+    // Phase 3+4: IVF_PQ indexed
+    // ================================================================
+    let ns_indexed = NamespaceId::new(format!("bench-indexed-{}", ts_nanos()))?;
+    println!("\n--- indexed namespace: {} ---", ns_indexed);
+
+    println!("upsert phase: {} rows...", cfg.rows);
+    let upsert_indexed = upsert_rows(&service, &ns_indexed, cfg.rows, cfg.dim).await?;
+    println!("  upsert completed in {:.1}s", upsert_indexed.as_secs_f64());
+
+    // Determine IVF_PQ parameters: num_partitions = sqrt(rows),
+    // num_sub_vectors = dim/16 (must divide dim evenly).
+    let num_partitions = (cfg.rows as f64).sqrt() as u32;
+    let num_sub_vectors = (cfg.dim / 16).max(1) as u32;
+    println!(
+        "index build: IVF_PQ, partitions={}, sub_vectors={}...",
+        num_partitions, num_sub_vectors
+    );
+    let index_start = Instant::now();
+    service
+        .create_index(&ns_indexed, Some(num_partitions), Some(num_sub_vectors))
+        .await?;
+    let index_elapsed = index_start.elapsed();
+    println!(
+        "  index build completed in {:.1}s",
+        index_elapsed.as_secs_f64()
+    );
+
+    println!(
+        "indexed cold: {} queries (nprobes={})...",
+        cfg.queries, cfg.nprobes
+    );
+    let indexed_cold_samples = run_queries(&service, &ns_indexed, &queries_indexed).await?;
+    let indexed_cold = percentiles(indexed_cold_samples);
+    println!(
+        "  p50={} p99={}",
+        fmt_dur(indexed_cold.p50),
+        fmt_dur(indexed_cold.p99)
+    );
+
+    println!("indexed warm: {} queries...", cfg.queries);
+    let indexed_warm_samples = run_queries(&service, &ns_indexed, &queries_indexed).await?;
+    let indexed_warm = percentiles(indexed_warm_samples);
+    println!(
+        "  p50={} p99={}",
+        fmt_dur(indexed_warm.p50),
+        fmt_dur(indexed_warm.p99)
+    );
+
+    // ================================================================
+    // Metrics summary
+    // ================================================================
     let metrics_text = metrics
         .encode()
         .map_err(|e| anyhow::anyhow!("encode metrics: {e}"))?;
-    let ns_label = format!(r#"namespace="{}""#, ns.as_str());
-    let query_op_label = format!(r#"namespace="{}",operation="query""#, ns.as_str());
-    let upsert_op_label = format!(r#"namespace="{}",operation="upsert""#, ns.as_str());
 
-    let cache_hits =
-        metric_value(&metrics_text, "firnflow_cache_hits_total", &ns_label).unwrap_or(0.0);
-    let cache_misses =
-        metric_value(&metrics_text, "firnflow_cache_misses_total", &ns_label).unwrap_or(0.0);
-    let s3_queries =
-        metric_value(&metrics_text, "firnflow_s3_requests_total", &query_op_label).unwrap_or(0.0);
-    let s3_upserts = metric_value(
-        &metrics_text,
-        "firnflow_s3_requests_total",
-        &upsert_op_label,
-    )
-    .unwrap_or(0.0);
+    let linear_label = format!(r#"namespace="{}""#, ns_linear.as_str());
+    let indexed_label = format!(r#"namespace="{}""#, ns_indexed.as_str());
 
+    let linear_misses =
+        metric_value(&metrics_text, "firnflow_cache_misses_total", &linear_label).unwrap_or(0.0);
+    let linear_hits =
+        metric_value(&metrics_text, "firnflow_cache_hits_total", &linear_label).unwrap_or(0.0);
+    let indexed_misses =
+        metric_value(&metrics_text, "firnflow_cache_misses_total", &indexed_label).unwrap_or(0.0);
+    let indexed_hits =
+        metric_value(&metrics_text, "firnflow_cache_hits_total", &indexed_label).unwrap_or(0.0);
+
+    println!("\nmetric summary:");
     println!(
-        "metric totals: cache_hits={}, cache_misses={}, s3_queries={}, s3_upserts={}",
-        cache_hits as u64, cache_misses as u64, s3_queries as u64, s3_upserts as u64
+        "  linear:  misses={}, hits={}",
+        linear_misses as u64, linear_hits as u64
+    );
+    println!(
+        "  indexed: misses={}, hits={}",
+        indexed_misses as u64, indexed_hits as u64
     );
 
-    // ---- speedup ratios ----
-    let p50_speedup = cold.p50.as_secs_f64() / warm.p50.as_secs_f64();
-    let p99_speedup = cold.p99.as_secs_f64() / warm.p99.as_secs_f64();
+    // ================================================================
+    // Write output
+    // ================================================================
+    let date = chrono_today();
+    let storage_mb = (cfg.rows as f64 * cfg.dim as f64 * 4.0) / (1024.0 * 1024.0);
 
-    // ---- write markdown output ----
-    let out = format_results(
-        &cfg,
-        upsert_elapsed,
-        &cold,
-        &warm,
-        p50_speedup,
-        p99_speedup,
-        cache_hits as u64,
-        cache_misses as u64,
-        s3_queries as u64,
-        s3_upserts as u64,
+    let out = format!(
+        "# Cold vs warm query latency — realistic parameters (slice 6d)\n\
+\n\
+- **Date**: {date}\n\
+- **Harness**: `./scripts/cargo run --release -p firnflow-bench`\n\
+- **Backend**: MinIO (see `docs/provider-support.md` for the pinned digest)\n\
+- **Config**: dim={dim}, rows={rows}, queries={queries}, nprobes={nprobes}\n\
+- **Storage**: ~{storage_mb:.0} MB raw vector data\n\
+- **Cache**: RAM={cache_ram}MB, NVMe={cache_nvme}MB\n\
+- **Upsert**: linear={upsert_linear:.1}s, indexed={upsert_indexed:.1}s\n\
+- **Index build**: IVF_PQ (partitions={num_partitions}, sub_vectors={num_sub_vectors}) \
+in **{index_secs:.1}s**\n\
+\n\
+## Four-phase latency comparison\n\
+\n\
+| phase       | path |    p50     |    p95     |    p99     |    max     |\n\
+| ----------- | ---- | ----------:| ----------:| ----------:| ----------:|\n\
+| linear scan | cold | {lc_p50} | {lc_p95} | {lc_p99} | {lc_max} |\n\
+| linear scan | warm | {lw_p50} | {lw_p95} | {lw_p99} | {lw_max} |\n\
+| IVF_PQ      | cold | {ic_p50} | {ic_p95} | {ic_p99} | {ic_max} |\n\
+| IVF_PQ      | warm | {iw_p50} | {iw_p95} | {iw_p99} | {iw_max} |\n\
+\n\
+## Speedup ratios\n\
+\n\
+| comparison | p50 | p99 |\n\
+| ---------- | ---:| ---:|\n\
+| linear cold → warm | {lc_lw_p50:.0}x | {lc_lw_p99:.0}x |\n\
+| indexed cold → warm | {ic_iw_p50:.0}x | {ic_iw_p99:.0}x |\n\
+| linear cold → indexed cold | {lc_ic_p50:.1}x | {lc_ic_p99:.1}x |\n\
+\n\
+## Cache + S3 request asymmetry\n\
+\n\
+| namespace | cache misses | cache hits | observation |\n\
+| --------- | -----------: | ---------: | ----------- |\n\
+| linear    | {linear_misses} | {linear_hits} | {queries} cold queries → {linear_misses} S3 trips; {queries} warm → 0 |\n\
+| indexed   | {indexed_misses} | {indexed_hits} | same pattern, but cold queries are dramatically faster |\n\
+\n\
+## The thesis\n\
+\n\
+1. **The cache without the index is a liability.** It hides the underlying \
+linear-scan cost, which surfaces on every cache miss.\n\
+2. **The index without the cache leaves money on the table.** Repeat queries \
+still pay the (now-fast) S3 round-trip.\n\
+3. **Together, the ANN index and the tiered cache make each other more valuable.** \
+Removing either is strictly worse.\n\
+\n\
+## Notes\n\
+\n\
+- Each run starts cold: fresh `tempfile::tempdir` for the foyer NVMe tier, \
+fresh namespace timestamps.\n\
+- `s3_requests_total` counts firnflow-initiated operations at the service \
+boundary, not raw HTTP requests to S3.\n\
+- Index build time is the \"Index Tax\" — paid once, amortised across all \
+subsequent queries.\n",
+        date = date,
+        dim = cfg.dim,
+        rows = cfg.rows,
+        queries = cfg.queries,
+        nprobes = cfg.nprobes,
+        storage_mb = storage_mb,
+        cache_ram = cfg.cache_ram_bytes / (1024 * 1024),
+        cache_nvme = cfg.cache_nvme_bytes / (1024 * 1024),
+        upsert_linear = upsert_linear.as_secs_f64(),
+        upsert_indexed = upsert_indexed.as_secs_f64(),
+        num_partitions = num_partitions,
+        num_sub_vectors = num_sub_vectors,
+        index_secs = index_elapsed.as_secs_f64(),
+        lc_p50 = fmt_dur(linear_cold.p50),
+        lc_p95 = fmt_dur(linear_cold.p95),
+        lc_p99 = fmt_dur(linear_cold.p99),
+        lc_max = fmt_dur(linear_cold.max),
+        lw_p50 = fmt_dur(linear_warm.p50),
+        lw_p95 = fmt_dur(linear_warm.p95),
+        lw_p99 = fmt_dur(linear_warm.p99),
+        lw_max = fmt_dur(linear_warm.max),
+        ic_p50 = fmt_dur(indexed_cold.p50),
+        ic_p95 = fmt_dur(indexed_cold.p95),
+        ic_p99 = fmt_dur(indexed_cold.p99),
+        ic_max = fmt_dur(indexed_cold.max),
+        iw_p50 = fmt_dur(indexed_warm.p50),
+        iw_p95 = fmt_dur(indexed_warm.p95),
+        iw_p99 = fmt_dur(indexed_warm.p99),
+        iw_max = fmt_dur(indexed_warm.max),
+        lc_lw_p50 = linear_cold.p50.as_secs_f64() / linear_warm.p50.as_secs_f64(),
+        lc_lw_p99 = linear_cold.p99.as_secs_f64() / linear_warm.p99.as_secs_f64(),
+        ic_iw_p50 = indexed_cold.p50.as_secs_f64() / indexed_warm.p50.as_secs_f64(),
+        ic_iw_p99 = indexed_cold.p99.as_secs_f64() / indexed_warm.p99.as_secs_f64(),
+        lc_ic_p50 = linear_cold.p50.as_secs_f64() / indexed_cold.p50.as_secs_f64(),
+        lc_ic_p99 = linear_cold.p99.as_secs_f64() / indexed_cold.p99.as_secs_f64(),
+        linear_misses = linear_misses as u64,
+        linear_hits = linear_hits as u64,
+        indexed_misses = indexed_misses as u64,
+        indexed_hits = indexed_hits as u64,
     );
 
     if let Some(parent) = cfg.out_path.parent() {
@@ -298,104 +491,16 @@ async fn main() -> anyhow::Result<()> {
     }
     fs::write(&cfg.out_path, &out)
         .with_context(|| format!("writing {}", cfg.out_path.display()))?;
-    println!("wrote {}", cfg.out_path.display());
+    println!("\nwrote {}", cfg.out_path.display());
 
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn format_results(
-    cfg: &BenchConfig,
-    upsert_elapsed: Duration,
-    cold: &Percentiles,
-    warm: &Percentiles,
-    p50_speedup: f64,
-    p99_speedup: f64,
-    cache_hits: u64,
-    cache_misses: u64,
-    s3_queries: u64,
-    s3_upserts: u64,
-) -> String {
-    let date = chrono_today();
-    format!(
-        "# Cold vs warm query latency — slice 2b baseline\n\
-\n\
-- **Date**: {date}\n\
-- **Harness**: `./scripts/cargo run --release -p firnflow-bench`\n\
-- **Backend**: MinIO (see `docs/provider-support.md` for the pinned digest)\n\
-- **Config**: dim={dim}, rows={rows}, queries={queries}\n\
-- **Upsert phase**: completed in {upsert_ms} ms\n\
-\n\
-## Cold vs warm latency\n\
-\n\
-| phase | queries |    p50     |    p95     |    p99     |    max     |\n\
-| ----- | -------:| ----------:| ----------:| ----------:| ----------:|\n\
-| cold  | {queries:>7} | {cold_p50} | {cold_p95} | {cold_p99} | {cold_max} |\n\
-| warm  | {queries:>7} | {warm_p50} | {warm_p95} | {warm_p99} | {warm_max} |\n\
-\n\
-**Speedup** (cold / warm): p50 = **{p50_speedup:.1}×**, p99 = **{p99_speedup:.1}×**\n\
-\n\
-## Cache + S3 request asymmetry\n\
-\n\
-| metric                                             | value |\n\
-| -------------------------------------------------- | ----: |\n\
-| `firnflow_cache_misses_total`                    | {cache_misses} |\n\
-| `firnflow_cache_hits_total`                      | {cache_hits} |\n\
-| `firnflow_s3_requests_total{{op=upsert}}`        | {s3_upserts} |\n\
-| `firnflow_s3_requests_total{{op=query}}`         | {s3_queries} |\n\
-\n\
-The load-bearing observation: **{cache_misses} query-kind S3 requests \
-for {queries} cold queries, then **0 additional** for {queries} warm \
-queries**. Every warm query was served from foyer without touching \
-the backend, which is the whole reason the cache exists.\n\
-\n\
-## Notes\n\
-\n\
-- `s3_requests_total` counts firnflow-initiated S3-bound *operations* \
-  at the service boundary, not raw HTTP requests to S3 — see the help \
-  text on the metric and CLAUDE.md § \"Known hard problems\" 3 for the \
-  approximation caveat.\n\
-- Each run starts cold: the bench uses a fresh `tempfile::tempdir` \
-  for the foyer NVMe tier and a fresh namespace timestamp so nothing \
-  is reused between runs.\n\
-- The vector dimension here ({dim}) is deliberately smaller than the \
-  1536 used in the serialisation benchmark so the run completes in \
-  seconds against MinIO over the `--network host` loopback. Bump it \
-  for production-representative numbers.\n",
-        date = date,
-        dim = cfg.dim,
-        rows = cfg.rows,
-        queries = cfg.queries,
-        upsert_ms = upsert_elapsed.as_millis(),
-        cold_p50 = fmt_us(cold.p50),
-        cold_p95 = fmt_us(cold.p95),
-        cold_p99 = fmt_us(cold.p99),
-        cold_max = fmt_us(cold.max),
-        warm_p50 = fmt_us(warm.p50),
-        warm_p95 = fmt_us(warm.p95),
-        warm_p99 = fmt_us(warm.p99),
-        warm_max = fmt_us(warm.max),
-        p50_speedup = p50_speedup,
-        p99_speedup = p99_speedup,
-        cache_hits = cache_hits,
-        cache_misses = cache_misses,
-        s3_upserts = s3_upserts,
-        s3_queries = s3_queries,
-    )
-}
-
-/// Best-effort "today's date". The bench doesn't pull in `chrono`
-/// just for this — we format the unix epoch in seconds into a
-/// simple YYYY-MM-DD using a calendar math approximation good
-/// enough for a bench-output header.
 fn chrono_today() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    // Convert to (year, month, day) using the proleptic Gregorian
-    // calendar algorithm from Howard Hinnant's date-algorithms
-    // paper (the same one std::chrono::year_month_day uses).
     let days = secs / 86_400;
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
