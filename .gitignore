@@ -1,5 +1,6 @@
 /target
 /.cargo-cache
+/docs
 *.swp
 .DS_Store
 .env
