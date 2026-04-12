@@ -72,7 +72,14 @@ type_and_run 'time curl -s -X POST http://localhost:3000/ns/demo/query \
   -H "content-type: application/json" \
   -d '"'"'{"vector":[1,0,0,0,0,0,0,0],"k":2}'"'"' | jq .'
 
-# 5. FTS query — search by text
+# 5. Build FTS index (required before text queries)
+echo ""
+echo "  --- building full-text search index ---"
+sleep 1
+type_and_run 'curl -s -X POST http://localhost:3000/ns/demo/fts-index | jq .'
+sleep 2
+
+# 6. FTS query — search by text
 echo ""
 echo "  --- full-text search ---"
 sleep 1
@@ -80,13 +87,13 @@ type_and_run 'curl -s -X POST http://localhost:3000/ns/demo/query \
   -H "content-type: application/json" \
   -d '"'"'{"text":"lazy","k":2}'"'"' | jq .'
 
-# 6. Show the metrics proving cache saved the S3 trip
+# 7. Show the metrics proving cache saved the S3 trip
 echo ""
 echo "  --- proof: cache hit saved an S3 round-trip ---"
 sleep 1
 type_and_run 'curl -s http://localhost:3000/metrics | grep -E "cache_hits|cache_misses|s3_requests_total"'
 
-# 7. Clean up
+# 8. Clean up
 echo ""
 echo "  --- delete namespace ---"
 sleep 1
