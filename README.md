@@ -1,8 +1,10 @@
 # firnflow
 
-**firnflow** is a high-performance, multi-tenant vector and full-text search engine backed by object storage (S3 / MinIO / R2 / GCS). It is designed as a credible open-source alternative to turbopuffer, proving that a professional-grade tiered storage architecture (**RAM → NVMe → S3**) is achievable entirely from open-source components.
+**firnflow** is a high-performance, multi-tenant vector and full-text search engine backed by object storage (S3 / MinIO / R2 / GCS). It is designed as a credible open-source alternative to turbopuffer, proving that a professional-grade tiered storage architecture (**RAM -> NVMe -> S3**) is achievable entirely from open-source components.
 
-## 🚀 The Headline: 5,616x Faster Search
+The cost efficiency of S3 with the speed of local RAM. A multi-tenant vector and full-text search engine backed by S3. Built with LanceDB and Foyer for sub-microsecond search latency on top of object storage.
+
+## The Headline: 5,616x Faster Search
 
 By pairing **LanceDB** (search on S3) with **foyer** (RAM + NVMe hybrid cache), firnflow delivers the cost efficiency of object storage with the latency of local memory:
 
@@ -10,7 +12,7 @@ By pairing **LanceDB** (search on S3) with **foyer** (RAM + NVMe hybrid cache), 
 *   **Warm Query (Cache):** ~0.002ms
 *   **S3 Savings:** Every cache hit results in **zero** S3 requests, directly reducing your cloud bill.
 
-## 🏗️ Architecture
+## Architecture
 
 firnflow is built on a "Tiered Storage" philosophy:
 
@@ -24,7 +26,7 @@ firnflow is built on a "Tiered Storage" philosophy:
 *   **foyer:** Advanced hybrid cache (RAM + NVMe) with LFU/LRU eviction.
 *   **Prometheus:** Full operational visibility into cache hits, misses, and S3 request savings.
 
-## 🛠️ Features
+## Features
 
 *   **Multi-tenant by Design:** Each namespace maps to an isolated S3 prefix (`s3://bucket/namespace/`) with near-zero idle cost.
 *   **Instant Invalidation:** A "Generation Counter" strategy ensures that after a write, all stale search results for that namespace are invalidated in $O(1)$ time.
@@ -32,19 +34,20 @@ firnflow is built on a "Tiered Storage" philosophy:
 *   **Zero-Copy Ready:** Optimized serialization via `bincode` (with architectural triggers to move to `rkyv` if needed).
 *   **Operational Excellence:** Native Prometheus metrics tracking cache hit rates and S3 request count (the primary signal for cost savings).
 
-## 🚦 Quickstart
+## Quickstart
 
 ### 1. Launch the Stack
 Everything you need (MinIO storage + Firnflow API) is orchestrated via Docker Compose:
 
 ```bash
-git clone https://github.com/your-repo/firnflow
+git clone https://github.com/gordonmurray/firnflow
 cd firnflow
 docker compose up --build
 ```
 
-### 2. Upsert a "Blue Cat" Vector
-The API is live at `http://localhost:3000`. Let's save a vector to the `demo` namespace:
+### 2. Upsert a Vector
+
+The API is live at `http://localhost:3000`. Save a vector to the `demo` namespace:
 
 ```bash
 curl -X POST http://localhost:3000/ns/demo/upsert \
@@ -72,7 +75,7 @@ See how much S3 traffic you've avoided:
 curl http://localhost:3000/metrics | grep s3_requests
 ```
 
-## 📡 API Surface
+## API Surface
 
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
@@ -83,7 +86,7 @@ curl http://localhost:3000/metrics | grep s3_requests
 | `/ns/{ns}/query` | `POST` | Vector, FTS, or hybrid search |
 | `/ns/{ns}/warmup` | `POST` | Non-blocking cache pre-warm hint |
 
-## 🧪 Development & Benchmarking
+## Development and Benchmarking
 
 firnflow uses a containerized toolchain. No local Rust installation is required.
 
@@ -96,6 +99,3 @@ firnflow uses a containerized toolchain. No local Rust installation is required.
 ```
 
 Benchmark results are committed at `bench/results/cold_vs_warm.md`.
-
-## 📜 Project Identity
-This project is human-authored. Architecture decisions and trade-offs are documented via ADRs in `docs/adr/`.
