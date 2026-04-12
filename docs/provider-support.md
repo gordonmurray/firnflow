@@ -76,6 +76,28 @@ This is easy to miss because compilation succeeds without the feature.
   337 s (~3.37 s per iteration including fresh namespace + 8 CAS
   writes + count_rows, ~3.7× MinIO owing to real S3 round-trip latency).
 
+### Phase 8 — realistic bench (dim=1536, rows=100k)
+
+- **Status**: COMPLETED (2026-04-12)
+- **Test**: `./scripts/cargo run --release -p firnflow-bench` with
+  `AWS_PROFILE=cloudfloe`, `FIRNFLOW_BENCH_DIM=1536`,
+  `FIRNFLOW_BENCH_ROWS=100000`
+- **Results** (`bench/results/cold_vs_warm_aws.md`):
+
+  | phase | path | p50 | p99 |
+  |-------|------|----:|----:|
+  | linear scan | cold | 25.14 s | 30.77 s |
+  | linear scan | warm | 66 us | 165 us |
+  | IVF_PQ | cold | 979 ms | 3.27 s |
+  | IVF_PQ | warm | 72 us | 296 us |
+
+- **Upsert**: 55.7s (linear), 59.2s (indexed)
+- **Index build**: IVF_PQ 316 partitions, 96 sub_vectors — **204.2s**
+- **Key finding**: linear scan is 25x slower than on MinIO (real
+  network latency). IVF_PQ index gives a **25.7x speedup** at p50
+  over linear scan — dramatically more impactful than the 5.9x
+  seen on MinIO loopback.
+
 ## GCS / R2
 
 - **Status**: UNVALIDATED. Out of scope for the current session.
