@@ -1,0 +1,32 @@
+[package]
+name = "firnflow-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tiered storage primitives for firnflow: namespace manager, LanceDB wrapper, foyer cache."
+
+[dependencies]
+foyer.workspace = true
+tokio.workspace = true
+serde.workspace = true
+dashmap.workspace = true
+xxhash-rust.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+lancedb.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+futures.workspace = true
+bincode.workspace = true
+prometheus.workspace = true
+object_store.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+
+[[bench]]
+name = "serialisation"
+harness = false

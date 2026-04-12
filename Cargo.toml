@@ -1,0 +1,78 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/firnflow-core",
+    "crates/firnflow-api",
+    "crates/firnflow-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+# Vector + FTS search engine on object storage.
+# Pinned exact per CLAUDE.md — bumps are a read-the-changelog event.
+# `aws` feature registers the S3 object store provider that lance-io
+# otherwise ships turned off through lancedb's transitive deps.
+lancedb = { version = "=0.27.2", features = ["aws"] }
+lance = "=4.0.0"
+
+# Arrow — pinned to the major that lance 4.0.0 requires (^57).
+arrow-array = "57"
+arrow-schema = "57"
+
+# `object_store` — lance-io 4.0.0 requires `^0.12.3`, so we match
+# that minor. Used by the DELETE path in `NamespaceManager` to list
+# and delete the S3 prefix for a namespace; lance uses it
+# internally for every storage operation.
+object_store = { version = "0.12", features = ["aws"] }
+
+# Hybrid RAM + NVMe cache.
+foyer = { version = "0.22", features = ["serde"] }
+
+# Async runtime.
+tokio = { version = "1", features = ["full"] }
+
+# Web framework.
+axum = "0.8"
+# `util` feature is required for `tower::ServiceExt::oneshot`, which
+# the firnflow-api smoke test uses to drive the router without
+# spinning up a real TCP listener.
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace"] }
+
+# Serialisation.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = { version = "2", features = ["serde"] }
+
+# Concurrent collections.
+dashmap = "6"
+
+# Hashing.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# Errors.
+thiserror = "2"
+anyhow = "1"
+
+# AWS SDK (used for the spike-2 pre-flight and any direct S3 ops;
+# note lancedb brings its own `object_store`-based S3 client internally).
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", features = ["behavior-version-latest"] }
+
+# Async stream utilities — needed where we consume lancedb's
+# `SendableRecordBatchStream` (collect into `Vec<RecordBatch>`).
+futures = "0.3"
+
+# Observability.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+prometheus = "0.13"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

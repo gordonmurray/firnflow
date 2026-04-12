@@ -1,0 +1,28 @@
+[package]
+name = "firnflow-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "firnflow axum REST server."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "firnflow-api"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+firnflow-core = { path = "../firnflow-core" }
+
+[dev-dependencies]
+tower.workspace = true
+tempfile = "3"

@@ -1,0 +1,6 @@
+/target
+/.cargo-cache
+*.swp
+.DS_Store
+.env
+.env.local

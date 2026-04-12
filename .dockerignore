@@ -1,0 +1,11 @@
+target/
+.cargo-cache/
+.git/
+.github/
+bench/results/
+docs/
+*.md
+PHASE*.md
+phase*_blog.md
+docker-compose.yml
+Dockerfile.dev

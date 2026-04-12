@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Run cargo inside the pinned Rust container.
+#
+# Bind-mounts the project at /work and stores cargo's registry/git cache
+# and the build target under project-local directories so nothing leaks
+# outside the repo and no host toolchain is required.
+
+set -Eeuo pipefail
+
+IMAGE="firnflow-rust-dev:1.94"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+    echo "Building ${IMAGE} (first run only)..." >&2
+    docker build -t "${IMAGE}" -f "${PROJECT_ROOT}/Dockerfile.dev" "${PROJECT_ROOT}" >&2
+fi
+
+mkdir -p "${PROJECT_ROOT}/.cargo-cache"
+
+# Mount the host's ~/.aws read-only when AWS_PROFILE is set so that
+# spike-2 tests can reach real AWS S3 via the host's configured
+# credentials. Path redirected to /aws so we don't conflict with
+# the container's HOME layout.
+AWS_MOUNT_ARGS=()
+if [ -n "${AWS_PROFILE:-}" ] && [ -d "${HOME}/.aws" ]; then
+    AWS_MOUNT_ARGS+=(
+        -v "${HOME}/.aws:/aws:ro"
+        -e "AWS_SHARED_CREDENTIALS_FILE=/aws/credentials"
+        -e "AWS_CONFIG_FILE=/aws/config"
+        -e "AWS_PROFILE=${AWS_PROFILE}"
+        -e "AWS_REGION=${AWS_REGION:-eu-west-1}"
+    )
+fi
+
+exec docker run --rm --init \
+    --network host \
+    --user "$(id -u):$(id -g)" \
+    -v "${PROJECT_ROOT}:/work" \
+    -e CARGO_HOME=/work/.cargo-cache \
+    -e CARGO_TARGET_DIR=/work/target \
+    -e CARGO_TERM_COLOR=always \
+    -e FIRNFLOW_S3_ENDPOINT="${FIRNFLOW_S3_ENDPOINT:-http://127.0.0.1:9000}" \
+    -e FIRNFLOW_S3_ACCESS_KEY="${FIRNFLOW_S3_ACCESS_KEY:-minioadmin}" \
+    -e FIRNFLOW_S3_SECRET_KEY="${FIRNFLOW_S3_SECRET_KEY:-minioadmin}" \
+    -e FIRNFLOW_S3_BUCKET="${FIRNFLOW_S3_BUCKET:-firnflow-test}" \
+    -e FIRNFLOW_AWS_BUCKET="${FIRNFLOW_AWS_BUCKET:-lakestream-spike2-cloudfloe}" \
+    "${AWS_MOUNT_ARGS[@]}" \
+    -w /work \
+    "${IMAGE}" \
+    cargo "$@"

@@ -1,0 +1,220 @@
+//! Prometheus metric handles plumbed through the library layers.
+//!
+//! [`CoreMetrics`] owns a `prometheus::Registry` plus typed counter,
+//! histogram and gauge handles for the exact metric set CLAUDE.md
+//! names:
+//!
+//! * `firnflow_cache_hits_total{namespace}`
+//! * `firnflow_cache_misses_total{namespace}`
+//! * `firnflow_query_duration_seconds{namespace, query_type}`
+//! * `firnflow_write_duration_seconds{namespace}`
+//! * `firnflow_active_namespaces`
+//! * `firnflow_s3_requests_total{namespace, operation}`
+//!
+//! Constructed once at process start (in
+//! `firnflow-api::state::build_state`), wrapped in `Arc`, and
+//! threaded into `NamespaceCache::new` and `NamespaceService::new`.
+//! Both layers record directly against their own `Arc<CoreMetrics>`
+//! — callers never thread a hit/miss outcome through the API.
+//!
+//! `s3_requests_total` is tracked at the service boundary (one
+//! increment per upsert, one per cache-miss query), which is an
+//! intentional *approximation*: the raw lance-io call count isn't
+//! exposed, and the purpose of this metric is to answer "did the
+//! cache save an S3 trip", not "how many S3 TCP connections
+//! happened". Help text documents the approximation.
+
+use std::sync::Arc;
+
+use dashmap::DashSet;
+use prometheus::{
+    Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry, TextEncoder,
+};
+
+use crate::{FirnflowError, NamespaceId};
+
+/// Process-wide metrics registry and typed handles.
+///
+/// Cheaply cloneable as an `Arc<CoreMetrics>`; internally the
+/// prometheus crate's types are already `Send + Sync` with cheap
+/// interior mutability.
+pub struct CoreMetrics {
+    registry: Registry,
+    cache_hits: IntCounterVec,
+    cache_misses: IntCounterVec,
+    query_duration: HistogramVec,
+    write_duration: HistogramVec,
+    active_namespaces: IntGauge,
+    s3_requests: IntCounterVec,
+    seen_namespaces: DashSet<NamespaceId>,
+}
+
+impl CoreMetrics {
+    /// Build a fresh registry and register every metric family.
+    ///
+    /// Fails only if prometheus rejects one of the metric
+    /// definitions, which in practice means a programming error
+    /// (duplicate name, malformed opts) — not a runtime failure.
+    pub fn new() -> Result<Self, FirnflowError> {
+        let registry = Registry::new();
+
+        let cache_hits = IntCounterVec::new(
+            Opts::new(
+                "firnflow_cache_hits_total",
+                "Cache hits, keyed by namespace.",
+            ),
+            &["namespace"],
+        )
+        .map_err(metrics_err)?;
+        registry
+            .register(Box::new(cache_hits.clone()))
+            .map_err(metrics_err)?;
+
+        let cache_misses = IntCounterVec::new(
+            Opts::new(
+                "firnflow_cache_misses_total",
+                "Cache misses, keyed by namespace.",
+            ),
+            &["namespace"],
+        )
+        .map_err(metrics_err)?;
+        registry
+            .register(Box::new(cache_misses.clone()))
+            .map_err(metrics_err)?;
+
+        let query_duration = HistogramVec::new(
+            HistogramOpts::new(
+                "firnflow_query_duration_seconds",
+                "End-to-end query latency, including cache lookup \
+                 and any cache-miss backend round-trip.",
+            ),
+            &["namespace", "query_type"],
+        )
+        .map_err(metrics_err)?;
+        registry
+            .register(Box::new(query_duration.clone()))
+            .map_err(metrics_err)?;
+
+        let write_duration = HistogramVec::new(
+            HistogramOpts::new(
+                "firnflow_write_duration_seconds",
+                "End-to-end upsert latency, including the cache \
+                 invalidation step.",
+            ),
+            &["namespace"],
+        )
+        .map_err(metrics_err)?;
+        registry
+            .register(Box::new(write_duration.clone()))
+            .map_err(metrics_err)?;
+
+        let active_namespaces = IntGauge::new(
+            "firnflow_active_namespaces",
+            "Distinct namespaces touched by this process since startup.",
+        )
+        .map_err(metrics_err)?;
+        registry
+            .register(Box::new(active_namespaces.clone()))
+            .map_err(metrics_err)?;
+
+        let s3_requests = IntCounterVec::new(
+            Opts::new(
+                "firnflow_s3_requests_total",
+                "firnflow-initiated operations that bypassed the cache \
+                 and would have issued S3 traffic. Counted at the service \
+                 boundary (one per upsert, one per cache-miss query), not \
+                 at raw `object_store` call granularity — this is the \
+                 signal for 'did the cache save a round-trip', not a \
+                 faithful count of HTTP requests to S3.",
+            ),
+            &["namespace", "operation"],
+        )
+        .map_err(metrics_err)?;
+        registry
+            .register(Box::new(s3_requests.clone()))
+            .map_err(metrics_err)?;
+
+        Ok(Self {
+            registry,
+            cache_hits,
+            cache_misses,
+            query_duration,
+            write_duration,
+            active_namespaces,
+            s3_requests,
+            seen_namespaces: DashSet::new(),
+        })
+    }
+
+    /// Borrow the underlying registry for the /metrics handler.
+    pub fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
+    /// Serialise the current metric state as a Prometheus text
+    /// exposition payload (`Content-Type: text/plain; version=0.0.4`).
+    pub fn encode(&self) -> Result<String, FirnflowError> {
+        let mut buffer = Vec::new();
+        let encoder = TextEncoder::new();
+        encoder
+            .encode(&self.registry.gather(), &mut buffer)
+            .map_err(metrics_err)?;
+        String::from_utf8(buffer).map_err(|e| FirnflowError::Metrics(e.to_string()))
+    }
+
+    /// Bump `active_namespaces` the first time we see a namespace.
+    fn touch(&self, ns: &NamespaceId) {
+        if self.seen_namespaces.insert(ns.clone()) {
+            self.active_namespaces.inc();
+        }
+    }
+
+    /// Record a cache hit for `ns`.
+    pub fn record_cache_hit(&self, ns: &NamespaceId) {
+        self.touch(ns);
+        self.cache_hits.with_label_values(&[ns.as_str()]).inc();
+    }
+
+    /// Record a cache miss for `ns`.
+    pub fn record_cache_miss(&self, ns: &NamespaceId) {
+        self.touch(ns);
+        self.cache_misses.with_label_values(&[ns.as_str()]).inc();
+    }
+
+    /// Record a query duration observation.
+    pub fn record_query(&self, ns: &NamespaceId, query_type: &str, duration_secs: f64) {
+        self.touch(ns);
+        self.query_duration
+            .with_label_values(&[ns.as_str(), query_type])
+            .observe(duration_secs);
+    }
+
+    /// Record a write duration observation.
+    pub fn record_write(&self, ns: &NamespaceId, duration_secs: f64) {
+        self.touch(ns);
+        self.write_duration
+            .with_label_values(&[ns.as_str()])
+            .observe(duration_secs);
+    }
+
+    /// Record a firnflow-initiated S3-bound operation. See the
+    /// help text on `firnflow_s3_requests_total` for why this is
+    /// an approximation.
+    pub fn record_s3_request(&self, ns: &NamespaceId, operation: &str) {
+        self.touch(ns);
+        self.s3_requests
+            .with_label_values(&[ns.as_str(), operation])
+            .inc();
+    }
+}
+
+/// Build an `Arc<CoreMetrics>` for tests and stand-alone binaries
+/// that don't need to share a registry across layers. Panics only
+/// if the prometheus crate rejects its own metric definitions.
+pub fn test_metrics() -> Arc<CoreMetrics> {
+    Arc::new(CoreMetrics::new().expect("construct CoreMetrics"))
+}
+
+fn metrics_err(e: impl std::fmt::Display) -> FirnflowError {
+    FirnflowError::Metrics(e.to_string())
+}

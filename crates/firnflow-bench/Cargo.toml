@@ -1,0 +1,13 @@
+[package]
+name = "firnflow-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "firnflow benchmark harness for cold vs warm query latency."
+
+[dependencies]
+firnflow-core = { path = "../firnflow-core" }
+tokio.workspace = true
+anyhow.workspace = true
+tempfile = "3"

@@ -1,0 +1,19 @@
+# Development toolchain for firnflow.
+#
+# The upstream rust:1.94-bookworm image ships rustc and cargo but does
+# not register rustfmt or clippy with rustup, so `cargo fmt` and
+# `cargo clippy` fail through the rustup proxy. This image layers the
+# missing component registrations on top.
+#
+# Also installs protobuf-compiler because `lance-encoding` (pulled in
+# transitively by `lancedb`) has a build.rs that shells out to `protoc`.
+
+FROM rust:1.94-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        protobuf-compiler \
+        libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add rustfmt clippy
