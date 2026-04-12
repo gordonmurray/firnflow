@@ -4,7 +4,7 @@
 
 The cost efficiency of S3 with the speed of local RAM. A multi-tenant vector and full-text search engine backed by S3. Built with LanceDB and Foyer for microsecond-scale search latency on top of object storage.
 
-## The Headline: 25 Seconds to 72 Microseconds
+## 25 Seconds to 72 Microseconds
 
 On real-world cloud infrastructure (AWS S3), a raw linear scan of 100,000 vectors can take **25 seconds** per query. By pairing **LanceDB** with a tiered **foyer** (RAM + NVMe) cache, **Firn** collapses that bottleneck:
 
@@ -14,6 +14,12 @@ On real-world cloud infrastructure (AWS S3), a raw linear scan of 100,000 vector
 *   **End-to-End HTTP (Warm):** **< 5ms** (including network RTT and JSON overhead)
 
 Every cache hit results in **zero** S3 requests, directly reducing your cloud bill while providing "instant" search response times.
+
+### Demo
+
+Cold query, warm query, full-text search, and cache proof — all in 60 seconds. This demo runs against local MinIO; on real AWS S3 the cold query takes 25 seconds instead of 109ms, making the cache speedup even more dramatic.
+
+![Firn demo](bench/demo.gif)
 
 ## Architecture
 
