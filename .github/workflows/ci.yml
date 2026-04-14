@@ -89,8 +89,11 @@ jobs:
             fi
             sleep 1
           done
-          docker run --rm --network host minio/mc:latest \
-            /bin/sh -c "
+          # The mc image's ENTRYPOINT is `mc`, so a literal `/bin/sh`
+          # gets passed as an mc subcommand and rejected. Override the
+          # entrypoint so we can chain `alias set` + `mb` in one run.
+          docker run --rm --network host --entrypoint /bin/sh \
+            minio/mc:latest -c "
               mc alias set local http://127.0.0.1:9000 minioadmin minioadmin &&
               mc mb --ignore-existing local/firnflow-test
             "
