@@ -158,6 +158,21 @@ impl NamespaceManager {
         self.dims.get(ns).map(|r| *r)
     }
 
+    /// Number of namespaces currently holding a pooled
+    /// `lancedb::Connection` + `lancedb::Table` handle. Mirrors the
+    /// `firnflow_cached_handles` gauge and is exposed for tests
+    /// that need to assert pool-hit / pool-miss behaviour directly.
+    pub fn pool_size(&self) -> usize {
+        self.handles.len()
+    }
+
+    /// Whether a pooled handle exists for `ns`. Useful for tests
+    /// that want to confirm a specific namespace was (or was not)
+    /// evicted.
+    pub fn is_pooled(&self, ns: &NamespaceId) -> bool {
+        self.handles.contains_key(ns)
+    }
+
     fn uri(&self, ns: &NamespaceId) -> String {
         format!("s3://{}/{}", self.bucket, ns.as_str())
     }

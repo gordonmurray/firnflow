@@ -284,6 +284,12 @@ impl CoreMetrics {
     pub fn dec_cached_handles(&self) {
         self.cached_handles.dec();
     }
+
+    /// Current value of the `firnflow_cached_handles` gauge. Used
+    /// by tests; production code should read it via `/metrics`.
+    pub fn cached_handles_value(&self) -> i64 {
+        self.cached_handles.get()
+    }
 }
 
 /// Build an `Arc<CoreMetrics>` for tests and stand-alone binaries
