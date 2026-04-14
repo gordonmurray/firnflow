@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+  # Tests fall back to these defaults when the env vars are not set,
+  # matching docker-compose.yml for local parity. Setting them
+  # explicitly in CI makes the wiring visible at a glance.
+  FIRNFLOW_S3_ENDPOINT: http://127.0.0.1:9000
+  FIRNFLOW_S3_ACCESS_KEY: minioadmin
+  FIRNFLOW_S3_SECRET_KEY: minioadmin
+  FIRNFLOW_S3_BUCKET: firnflow-test
+
+jobs:
+  test:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest ships with ~14 GB free. Lance + DataFusion in
+      # debug profile fit, but the margin is thin once test binaries
+      # land. This action reclaims ~25 GB without touching anything
+      # the build needs.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: false
+
+      - name: Install protobuf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler libprotobuf-dev
+
+      # Rust 1.94 matches Dockerfile.dev. rustfmt / clippy must be
+      # installed as components up front — CLAUDE.md calls out that
+      # rustup's proxy misreports them as missing otherwise.
+      - name: Install Rust 1.94
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Makes the cache key depend on Cargo.lock so a dependency
+          # change busts the cache cleanly. Default already does this;
+          # restated here for clarity.
+          shared-key: ci
+          cache-on-failure: true
+
+      # Pull the MinIO image once, start it in the background, then
+      # create the bucket the integration tests default to. Using a
+      # plain `docker run` (rather than GHA `services:`) keeps the
+      # CMD for `server /data` readable and lets us do bucket init
+      # inline in the same job.
+      - name: Start MinIO and create test bucket
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 -p 9001:9001 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:RELEASE.2025-09-07T16-13-09Z \
+            server /data --console-address ":9001"
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:9000/minio/health/live; then
+              echo "minio is up"
+              break
+            fi
+            sleep 1
+          done
+          docker run --rm --network host minio/mc:latest \
+            /bin/sh -c "
+              mc alias set local http://127.0.0.1:9000 minioadmin minioadmin &&
+              mc mb --ignore-existing local/firnflow-test
+            "
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test (unit + default)
+        run: cargo test --workspace --no-fail-fast
+
+      # MinIO-backed integration tests are all gated #[ignore] so the
+      # previous step skips them. This step opts them in, minus:
+      #   * `_aws` variants — need real AWS credentials, not in CI
+      #   * `_100_runs_*` — spike-2 stress suites, overkill per PR
+      - name: cargo test (integration, MinIO-backed)
+        run: |
+          cargo test --workspace --no-fail-fast -- \
+            --include-ignored \
+            --skip _aws \
+            --skip _100_runs_
+
+      - name: Dump MinIO logs on failure
+        if: failure()
+        run: docker logs minio --tail 200 || true
