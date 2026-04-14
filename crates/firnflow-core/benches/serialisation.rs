@@ -41,6 +41,7 @@ fn make_result_set(n: usize) -> QueryResultSet {
             vector: (0..VECTOR_DIM)
                 .map(|j| ((i * 7 + j * 13) as f32) * 0.0001)
                 .collect(),
+            text: None,
         })
         .collect();
     QueryResultSet {
