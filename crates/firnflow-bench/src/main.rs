@@ -251,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
     let manager = Arc::new(NamespaceManager::new(
         cfg.bucket.clone(),
         cfg.storage_options.clone(),
+        Arc::clone(&metrics),
     ));
     let cache = Arc::new(
         NamespaceCache::new(

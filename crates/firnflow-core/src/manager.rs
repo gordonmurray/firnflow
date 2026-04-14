@@ -1,10 +1,7 @@
 //! Namespace manager — the production shim over lancedb.
 //!
 //! Each namespace maps to its own Lance table rooted at
-//! `s3://{bucket}/{namespace}/`. The manager is stateless with
-//! respect to connections: every public call opens a fresh
-//! `lancedb::Connection`. Connection caching is a later
-//! optimisation.
+//! `s3://{bucket}/{namespace}/`.
 //!
 //! **Per-namespace dimensions (slice 6a):** the manager no longer
 //! carries a global `vector_dim`. Instead, dimensions are:
@@ -19,6 +16,19 @@
 //! namespace per process lifetime. Entries stay until the process
 //! restarts or the namespace is deleted (in which case the stale
 //! entry is evicted lazily on next use).
+//!
+//! **Connection pooling (issue #1):** each namespace's
+//! `lancedb::Connection` + `lancedb::Table` are cached in a
+//! `DashMap<NamespaceId, NamespaceHandle>` after the first
+//! successful open. Subsequent upserts, queries, index builds, and
+//! compactions reuse the cached handle, skipping the
+//! S3-credential-resolution and manifest-read cost of a fresh
+//! `lancedb::connect()` + `open_table()`.
+//!
+//! The pool is invalidated on namespace delete and on operations
+//! that change the table's manifest (index build, compaction). A
+//! regular append-only upsert does **not** evict — Lance appends
+//! are visible through the existing handle.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,6 +51,7 @@ use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as ObjectStorePath;
 use object_store::ObjectStore;
 
+use crate::metrics::CoreMetrics;
 use crate::query::DEFAULT_NPROBES;
 use crate::{FirnflowError, NamespaceId, QueryResult, QueryResultSet};
 
@@ -70,18 +81,41 @@ impl From<(u64, Vec<f32>)> for UpsertRow {
     }
 }
 
-/// Stateless namespace manager over an S3-backed set of Lance tables.
+/// Cached per-namespace backend handles. Both members are cheap to
+/// hold: `Connection` is an S3 client + config; `Table` is an
+/// in-memory metadata handle referencing the connection. Storing
+/// both explicitly (rather than leaning on `Table`'s internal
+/// reference to its connection) keeps the slow-path logic
+/// self-contained and leaves room for a future code path that
+/// wants to re-open a table against the cached connection.
+struct NamespaceHandle {
+    #[allow(dead_code)]
+    conn: lancedb::Connection,
+    table: lancedb::Table,
+}
+
+/// Namespace manager over an S3-backed set of Lance tables.
 ///
 /// Each namespace independently determines its own vector dimension
 /// — either inferred from the first upsert or read from the
 /// existing Lance table schema. A single manager instance can serve
 /// namespaces with different dimensions simultaneously.
+///
+/// The manager caches an `lancedb::Connection` + `lancedb::Table`
+/// per namespace in an internal `DashMap` so repeat operations on
+/// the same namespace avoid the S3 credential-resolution and
+/// manifest-read round-trip of a fresh `lancedb::connect()`.
 pub struct NamespaceManager {
     bucket: String,
     storage_options: HashMap<String, String>,
     /// Per-namespace resolved dimensions. Populated on first
     /// interaction with each namespace (upsert or query).
     dims: DashMap<NamespaceId, usize>,
+    /// Per-namespace connection + table handles. Populated lazily
+    /// by [`NamespaceManager::get_or_open_table`] and evicted on
+    /// namespace delete / index build / compaction.
+    handles: DashMap<NamespaceId, NamespaceHandle>,
+    metrics: Arc<CoreMetrics>,
 }
 
 impl NamespaceManager {
@@ -93,11 +127,27 @@ impl NamespaceManager {
     /// * `storage_options` – `object_store`-style key/value options
     ///   passed verbatim to lancedb's connection builder. Use
     ///   `aws_endpoint` / `aws_access_key_id` / etc. keys.
-    pub fn new(bucket: impl Into<String>, storage_options: HashMap<String, String>) -> Self {
+    /// * `metrics` – process-wide metrics registry; the manager
+    ///   adjusts `firnflow_cached_handles` as connection pool
+    ///   entries are added and removed.
+    ///
+    /// **Credential rotation note:** `storage_options` is captured
+    /// once and reused for the lifetime of every cached connection.
+    /// If the deployment rotates credentials at runtime, every
+    /// cached handle must be flushed when `storage_options` changes
+    /// — no such mechanism exists today. For V1 we document this
+    /// as a known single-process assumption.
+    pub fn new(
+        bucket: impl Into<String>,
+        storage_options: HashMap<String, String>,
+        metrics: Arc<CoreMetrics>,
+    ) -> Self {
         Self {
             bucket: bucket.into(),
             storage_options,
             dims: DashMap::new(),
+            handles: DashMap::new(),
+            metrics,
         }
     }
 
@@ -106,6 +156,21 @@ impl NamespaceManager {
     /// with.
     pub fn dim_for(&self, ns: &NamespaceId) -> Option<usize> {
         self.dims.get(ns).map(|r| *r)
+    }
+
+    /// Number of namespaces currently holding a pooled
+    /// `lancedb::Connection` + `lancedb::Table` handle. Mirrors the
+    /// `firnflow_cached_handles` gauge and is exposed for tests
+    /// that need to assert pool-hit / pool-miss behaviour directly.
+    pub fn pool_size(&self) -> usize {
+        self.handles.len()
+    }
+
+    /// Whether a pooled handle exists for `ns`. Useful for tests
+    /// that want to confirm a specific namespace was (or was not)
+    /// evicted.
+    pub fn is_pooled(&self, ns: &NamespaceId) -> bool {
+        self.handles.contains_key(ns)
     }
 
     fn uri(&self, ns: &NamespaceId) -> String {
@@ -135,34 +200,50 @@ impl NamespaceManager {
             .map_err(|e| FirnflowError::Backend(format!("lancedb connect: {e}")))
     }
 
-    /// Try to open the existing table and read its vector dimension
-    /// from the schema. Returns `Ok(Some((table, dim)))` if the
-    /// table exists, `Ok(None)` if it does not.
-    async fn open_existing(
-        &self,
-        ns: &NamespaceId,
-    ) -> Result<Option<(lancedb::Table, usize)>, FirnflowError> {
-        let conn = self.connect(ns).await?;
-        match conn.open_table(TABLE_NAME).execute().await {
-            Ok(tbl) => {
-                let dim = read_dim_from_table(&tbl).await?;
-                Ok(Some((tbl, dim)))
-            }
-            Err(_) => Ok(None),
+    /// Insert a freshly opened `NamespaceHandle` into the pool and
+    /// bump the `cached_handles` gauge. If a handle for `ns` already
+    /// exists (race between two concurrent openers), the second
+    /// insert overwrites the first — both are valid, the first is
+    /// simply dropped.
+    fn cache_handle(&self, ns: &NamespaceId, conn: lancedb::Connection, table: lancedb::Table) {
+        let previous = self
+            .handles
+            .insert(ns.clone(), NamespaceHandle { conn, table });
+        if previous.is_none() {
+            self.metrics.inc_cached_handles();
         }
     }
 
-    /// Open the namespace's data table, creating it with an empty
-    /// batch if it does not yet exist. The dimension must be known
-    /// at creation time (from the first upsert).
-    async fn open_or_create_table(
+    /// Drop a namespace's cached handle and decrement the gauge.
+    /// Called after operations that change the table's manifest or
+    /// remove its data: delete, index build, compaction.
+    fn evict_handle(&self, ns: &NamespaceId) {
+        if self.handles.remove(ns).is_some() {
+            self.metrics.dec_cached_handles();
+        }
+    }
+
+    /// Return a cached `lancedb::Table` for `ns`, opening (and if
+    /// necessary, creating) one on a cache miss. This is the single
+    /// entry point every public method uses to obtain a table
+    /// handle — removing the old "new connection per call" cost.
+    ///
+    /// On a miss the table is opened; if it does not yet exist a
+    /// fresh one is created with the `dim`-shaped schema. The
+    /// resulting handle is cached in `self.handles` so the next
+    /// caller hits the fast path.
+    async fn get_or_open_table(
         &self,
         ns: &NamespaceId,
         dim: usize,
     ) -> Result<lancedb::Table, FirnflowError> {
+        if let Some(entry) = self.handles.get(ns) {
+            return Ok(entry.table.clone());
+        }
+
         let conn = self.connect(ns).await?;
-        match conn.open_table(TABLE_NAME).execute().await {
-            Ok(tbl) => Ok(tbl),
+        let table = match conn.open_table(TABLE_NAME).execute().await {
+            Ok(tbl) => tbl,
             Err(_) => {
                 let schema = Self::schema_for_dim(dim);
                 let empty = rows_to_batch(&schema, dim, Vec::new())?;
@@ -171,8 +252,38 @@ impl NamespaceManager {
                 conn.create_table(TABLE_NAME, reader)
                     .execute()
                     .await
-                    .map_err(|e| FirnflowError::Backend(format!("create_table: {e}")))
+                    .map_err(|e| FirnflowError::Backend(format!("create_table: {e}")))?
             }
+        };
+
+        let cloned = table.clone();
+        self.cache_handle(ns, conn, table);
+        Ok(cloned)
+    }
+
+    /// Try to open an existing table for `ns` without creating one.
+    /// Used by [`resolve_dim`] to discover a namespace's dimension
+    /// from its persisted schema. On success the handle is cached
+    /// so the subsequent operation avoids a second `open_table`.
+    async fn open_existing(
+        &self,
+        ns: &NamespaceId,
+    ) -> Result<Option<(lancedb::Table, usize)>, FirnflowError> {
+        if let Some(entry) = self.handles.get(ns) {
+            let tbl = entry.table.clone();
+            drop(entry);
+            let dim = read_dim_from_table(&tbl).await?;
+            return Ok(Some((tbl, dim)));
+        }
+
+        let conn = self.connect(ns).await?;
+        match conn.open_table(TABLE_NAME).execute().await {
+            Ok(tbl) => {
+                let dim = read_dim_from_table(&tbl).await?;
+                self.cache_handle(ns, conn, tbl.clone());
+                Ok(Some((tbl, dim)))
+            }
+            Err(_) => Ok(None),
         }
     }
 
@@ -233,7 +344,7 @@ impl NamespaceManager {
             }
         }
 
-        let tbl = self.open_or_create_table(ns, dim).await?;
+        let tbl = self.get_or_open_table(ns, dim).await?;
         let schema = Self::schema_for_dim(dim);
         let batch = rows_to_batch(&schema, dim, rows)?;
         let reader: Box<dyn RecordBatchReader + Send> =
@@ -251,8 +362,10 @@ impl NamespaceManager {
     /// Remove every object under a namespace prefix from the
     /// underlying object store.
     ///
-    /// Also evicts the cached dimension for this namespace so that
-    /// a subsequent upsert can establish a new dimension.
+    /// Also evicts the cached dimension **and** the pooled
+    /// connection/table handle for this namespace so that a
+    /// subsequent upsert can establish a new dimension against a
+    /// fresh Lance table.
     ///
     /// Returns the number of objects deleted. The caller
     /// (`NamespaceService::delete`) is responsible for invalidating
@@ -273,8 +386,9 @@ impl NamespaceManager {
             count += 1;
         }
 
-        // Evict the dimension cache so a fresh upsert can pick a new dim.
+        // Evict dim + pooled handle so a fresh upsert can pick a new dim.
         self.dims.remove(ns);
+        self.evict_handle(ns);
 
         Ok(count)
     }
@@ -349,7 +463,7 @@ impl NamespaceManager {
         }
 
         let nprobes = nprobes.unwrap_or(DEFAULT_NPROBES);
-        let tbl = self.open_or_create_table(ns, dim).await?;
+        let tbl = self.get_or_open_table(ns, dim).await?;
 
         let stream = if has_vector {
             // Vector-only or hybrid (lancedb auto-detects hybrid when
@@ -411,7 +525,7 @@ impl NamespaceManager {
             ))
         })?;
 
-        let tbl = self.open_or_create_table(ns, dim).await?;
+        let tbl = self.get_or_open_table(ns, dim).await?;
 
         let mut builder = IvfPqIndexBuilder::default().distance_type(DistanceType::L2);
         if let Some(n) = num_partitions {
@@ -426,6 +540,11 @@ impl NamespaceManager {
             .await
             .map_err(|e| FirnflowError::Backend(format!("create_index: {e}")))?;
 
+        // Evict the pooled handle: building an index bumps the
+        // table manifest, so the next operation should open a fresh
+        // table view rather than reuse metadata captured before the
+        // build.
+        self.evict_handle(ns);
         Ok(())
     }
 
@@ -439,12 +558,14 @@ impl NamespaceManager {
             ))
         })?;
 
-        let tbl = self.open_or_create_table(ns, dim).await?;
+        let tbl = self.get_or_open_table(ns, dim).await?;
         tbl.create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
             .execute()
             .await
             .map_err(|e| FirnflowError::Backend(format!("create_fts_index: {e}")))?;
 
+        // Same manifest-bump rationale as `create_index`.
+        self.evict_handle(ns);
         Ok(())
     }
 
@@ -465,7 +586,7 @@ impl NamespaceManager {
             ))
         })?;
 
-        let tbl = self.open_or_create_table(ns, dim).await?;
+        let tbl = self.get_or_open_table(ns, dim).await?;
         let stats = tbl
             .optimize(OptimizeAction::default())
             .await
@@ -475,6 +596,10 @@ impl NamespaceManager {
             .compaction
             .map(|c| (c.fragments_removed, c.fragments_added))
             .unwrap_or((0, 0));
+
+        // Compaction rewrites fragments: any cached Table view is
+        // pointing at file offsets that no longer exist.
+        self.evict_handle(ns);
 
         Ok(CompactResult {
             fragments_removed: removed,
