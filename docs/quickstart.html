@@ -135,8 +135,10 @@ curl -X POST http://localhost:3000/ns/articles/fts-index</code></pre>
     <p>Key lines to look for:</p>
     <pre><code>firnflow_cache_hits_total{namespace="demo"} 1
 firnflow_cache_misses_total{namespace="demo"} 1
-firnflow_s3_requests_total{namespace="demo",operation="query"} 1</code></pre>
-    <p>The cache miss count stays at 1 no matter how many times you repeat the same query. Every subsequent hit is free.</p>
+firnflow_s3_requests_total{namespace="demo",operation="query"} 1
+firnflow_active_namespaces 1
+firnflow_cached_handles 1</code></pre>
+    <p>The cache miss count stays at 1 no matter how many times you repeat the same query. Every subsequent hit is free. <code>firnflow_cached_handles</code> tracks namespaces with a warm LanceDB connection in the in-process pool &mdash; the first request to any namespace opens the connection, every later request reuses it.</p>
 
     <h2>Next steps</h2>
     <ul>

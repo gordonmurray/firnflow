@@ -68,7 +68,7 @@
       <li><strong>Hash the query.</strong> The full <code>QueryRequest</code> (vector, k, nprobes, text) is serialised with bincode and hashed with xxh3 to produce a deterministic <code>QueryHash</code>.</li>
       <li><strong>Build the cache key.</strong> The key is a tuple of <code>(namespace, generation, query_hash)</code>. The generation counter ensures stale results are never returned after a write.</li>
       <li><strong>Check foyer.</strong> The HybridCache checks RAM first, then NVMe. On a hit, the serialised result is returned and a <code>cache_hits_total</code> metric is recorded.</li>
-      <li><strong>On miss: query S3.</strong> LanceDB runs the query against the Lance table on S3 (vector nearest-neighbour, BM25 FTS, or hybrid). The result is serialised with bincode and stored in foyer. A <code>cache_misses_total</code> and <code>s3_requests_total</code> metric are recorded.</li>
+      <li><strong>On miss: query S3.</strong> LanceDB runs the query against the Lance table on S3 (vector nearest-neighbour, BM25 FTS, or hybrid) using the namespace's pooled <code>Connection</code> and <code>Table</code> handle &mdash; the first request for a namespace opens and caches the handle, every subsequent request skips the credential-resolution and manifest-read round-trips. The result is serialised with bincode and stored in foyer. A <code>cache_misses_total</code> and <code>s3_requests_total</code> metric are recorded.</li>
       <li><strong>Return the result.</strong> The query duration (cache hit or miss) is recorded in the <code>query_duration_seconds</code> histogram.</li>
     </ol>
 
@@ -103,6 +103,19 @@
         <tr><td>Trade-off</td><td>Stale-generation entries remain in the cache until evicted by foyer. Under write-heavy workloads, the NVMe tier may hold unreachable entries temporarily.</td></tr>
       </tbody>
     </table>
+
+    <h2>Connection pool</h2>
+    <p>The namespace manager caches a <code>lancedb::Connection</code> and <code>Table</code> handle per namespace after the first open. Without the pool, every upsert and every cache-miss query would re-run S3 credential resolution and re-read the Lance table manifest from S3; with the pool, those costs are paid once per namespace per process lifetime.</p>
+
+    <p>The pool is invalidated on operations that change the table's manifest or remove its data:</p>
+    <ul>
+      <li><code>DELETE /ns/{ns}</code> &mdash; all objects gone, handle evicted</li>
+      <li><code>POST /ns/{ns}/index</code> and <code>/fts-index</code> &mdash; manifest bumped, handle evicted</li>
+      <li><code>POST /ns/{ns}/compact</code> &mdash; fragment offsets change, handle evicted</li>
+    </ul>
+    <p>Ordinary upserts do <strong>not</strong> evict the handle. Lance appends are visible through the existing handle, so there is no need to reopen the table on every write.</p>
+
+    <p>Pool occupancy is exposed as the <code>firnflow_cached_handles</code> gauge at <code>/metrics</code>. Compare it against <code>firnflow_active_namespaces</code> to see how many namespaces are currently paying the cold-open cost.</p>
 
     <h2>Namespace isolation</h2>
     <p>Each namespace is a fully isolated unit:</p>

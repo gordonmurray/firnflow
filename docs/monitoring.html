@@ -126,6 +126,12 @@ scrape_configs:
           <td><em>none</em></td>
           <td>Number of distinct namespaces that have been accessed since startup.</td>
         </tr>
+        <tr>
+          <td><code>firnflow_cached_handles</code></td>
+          <td>Gauge</td>
+          <td><em>none</em></td>
+          <td>Number of namespaces holding a warm <code>lancedb::Connection</code> and <code>Table</code> handle in the in-process pool. The delta against <code>firnflow_active_namespaces</code> is the number of active namespaces that will pay the cold-open cost on their next request.</td>
+        </tr>
       </tbody>
     </table>
 
@@ -163,6 +169,10 @@ histogram_quantile(0.99, rate(firnflow_query_duration_seconds_bucket[5m]))</code
 
     <h3>Write throughput</h3>
     <pre><code>rate(firnflow_s3_requests_total{operation="upsert"}[5m])</code></pre>
+
+    <h3>Namespaces paying cold-open cost</h3>
+    <p>Active namespaces without a pooled connection handle. The first request to any of these will re-run the S3 credential resolution and manifest read:</p>
+    <pre><code>firnflow_active_namespaces - firnflow_cached_handles</code></pre>
 
     <h2>Alerting rules</h2>
     <p>Suggested Prometheus alerting rules for production deployments:</p>
@@ -250,6 +260,11 @@ groups:
           <td>Active namespaces</td>
           <td>Stat</td>
           <td><code>firnflow_active_namespaces</code></td>
+        </tr>
+        <tr>
+          <td>Pooled connection handles</td>
+          <td>Stat</td>
+          <td><code>firnflow_cached_handles</code></td>
         </tr>
         <tr>
           <td>Write latency (p50, p99)</td>
