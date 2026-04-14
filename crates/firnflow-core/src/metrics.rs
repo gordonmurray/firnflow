@@ -10,6 +10,7 @@
 //! * `firnflow_write_duration_seconds{namespace}`
 //! * `firnflow_active_namespaces`
 //! * `firnflow_s3_requests_total{namespace, operation}`
+//! * `firnflow_cached_handles`
 //!
 //! Constructed once at process start (in
 //! `firnflow-api::state::build_state`), wrapped in `Arc`, and
@@ -48,6 +49,7 @@ pub struct CoreMetrics {
     s3_requests: IntCounterVec,
     index_build_duration: HistogramVec,
     compaction_duration: HistogramVec,
+    cached_handles: IntGauge,
     seen_namespaces: DashSet<NamespaceId>,
 }
 
@@ -166,6 +168,19 @@ impl CoreMetrics {
             .register(Box::new(compaction_duration.clone()))
             .map_err(metrics_err)?;
 
+        let cached_handles = IntGauge::new(
+            "firnflow_cached_handles",
+            "Number of namespaces with a warm `lancedb::Connection` + \
+             `lancedb::Table` handle in the in-process pool. Compare \
+             against `firnflow_active_namespaces` — the delta is the \
+             number of active namespaces that will pay cold-open cost \
+             on their next request.",
+        )
+        .map_err(metrics_err)?;
+        registry
+            .register(Box::new(cached_handles.clone()))
+            .map_err(metrics_err)?;
+
         Ok(Self {
             registry,
             cache_hits,
@@ -176,6 +191,7 @@ impl CoreMetrics {
             s3_requests,
             index_build_duration,
             compaction_duration,
+            cached_handles,
             seen_namespaces: DashSet::new(),
         })
     }
@@ -255,6 +271,18 @@ impl CoreMetrics {
         self.compaction_duration
             .with_label_values(&[ns.as_str()])
             .observe(duration_secs);
+    }
+
+    /// Bump the cached-handles gauge when `NamespaceManager` inserts
+    /// a fresh `NamespaceHandle` into its pool.
+    pub fn inc_cached_handles(&self) {
+        self.cached_handles.inc();
+    }
+
+    /// Drop the cached-handles gauge when `NamespaceManager` evicts
+    /// a `NamespaceHandle` (namespace delete / index build / compact).
+    pub fn dec_cached_handles(&self) {
+        self.cached_handles.dec();
     }
 }
 

@@ -64,7 +64,11 @@ async fn build_app_with_metrics() -> (axum::Router, tempfile::TempDir, Arc<CoreM
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
     let tmp = tempfile::tempdir().unwrap();
     let metrics = test_metrics();
-    let manager = Arc::new(NamespaceManager::new(bucket, minio_options()));
+    let manager = Arc::new(NamespaceManager::new(
+        bucket,
+        minio_options(),
+        Arc::clone(&metrics),
+    ));
     let cache = Arc::new(
         NamespaceCache::new(
             16 * 1024 * 1024,

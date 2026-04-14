@@ -35,6 +35,7 @@ pub async fn build_state(cfg: &AppConfig) -> anyhow::Result<AppState> {
     let manager = Arc::new(NamespaceManager::new(
         cfg.bucket.clone(),
         cfg.storage_options.clone(),
+        Arc::clone(&metrics),
     ));
 
     std::fs::create_dir_all(&cfg.cache_nvme_path).with_context(|| {
