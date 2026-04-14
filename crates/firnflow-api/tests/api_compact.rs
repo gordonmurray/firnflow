@@ -170,9 +170,11 @@ async fn compact_reduces_fragments_after_many_upserts() {
         assert_eq!(status, StatusCode::OK, "upsert batch {batch} failed");
     }
 
-    // 2. Verify all rows are queryable pre-compaction.
+    // 2. Verify all rows are queryable pre-compaction. Query vector
+    //    matches the id=0 row from the upsert loop above (id * 7919
+    //    drops out when id is 0).
     let query_vec: Vec<f32> = (0..dim)
-        .map(|j| (((0 * 7919 + j * 31) as f32) * 0.001).sin())
+        .map(|j| (((j * 31) as f32) * 0.001).sin())
         .collect();
     let (status, body) = post_json(
         app.clone(),
@@ -220,9 +222,10 @@ async fn compact_reduces_fragments_after_many_upserts() {
 
     // 6. Verify data integrity: query still returns results after
     //    compaction. The cache was invalidated by the service, so
-    //    this goes through the compacted data files.
+    //    this goes through the compacted data files. Same id=0
+    //    query vector as step 2.
     let query_vec: Vec<f32> = (0..dim)
-        .map(|j| (((0 * 7919 + j * 31) as f32) * 0.001).sin())
+        .map(|j| (((j * 31) as f32) * 0.001).sin())
         .collect();
     let (status, body) = post_json(
         app,
