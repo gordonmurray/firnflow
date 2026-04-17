@@ -17,7 +17,7 @@ Every cache hit results in **zero** S3 requests, directly reducing your cloud bi
 
 ### Demo
 
-Cold query, warm query, full-text search, and cache proof — all in 60 seconds. This demo runs against local MinIO; on real AWS S3 the cold query takes 25 seconds instead of 109ms, making the cache speedup even more dramatic.
+Cold query, warm query, full-text search, and cache proof, all in 60 seconds. This demo runs against local MinIO; on real AWS S3 the cold query takes 25 seconds instead of 109ms, making the cache speedup even more dramatic.
 
 ![Firn demo](bench/demo.gif)
 
@@ -25,9 +25,9 @@ Cold query, warm query, full-text search, and cache proof — all in 60 seconds.
 
 **Firn** is built on a "Tiered Storage" philosophy:
 
-1.  **L1: RAM Cache** (via foyer) — Sub-microsecond access for the most frequent queries.
-2.  **L2: NVMe Cache** (via foyer) — Fast, durable cache for high-volume search results.
-3.  **L3: Object Storage** (via LanceDB + S3/MinIO) — The "Source of Truth" where every namespace is isolated under its own S3 prefix.
+1.  **L1: RAM Cache** (via foyer): Sub-microsecond access for the most frequent queries.
+2.  **L2: NVMe Cache** (via foyer): Fast, durable cache for high-volume search results.
+3.  **L3: Object Storage** (via LanceDB + S3/MinIO): The "Source of Truth" where every namespace is isolated under its own S3 prefix.
 
 ### Key Technologies
 *   **axum:** High-performance async REST API.
