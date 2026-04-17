@@ -98,6 +98,64 @@ fn aws_storage_options() -> HashMap<String, String> {
     HashMap::from([("aws_region".into(), env_or("AWS_REGION", "eu-west-1"))])
 }
 
+/// Storage options for an S3-compatible backend fronted by an
+/// explicit endpoint URL + static credentials. Path-style: with a
+/// custom `aws_endpoint`, object_store 0.12 does *not* prepend the
+/// bucket to the hostname under virtual-hosted mode, which leaves
+/// the bucket missing from the URL entirely (observed as 501 / 404
+/// NoSuchBucket on R2 + Tigris). Path-style routes `{endpoint}/
+/// {bucket}/{key}` explicitly and works cleanly on both.
+fn compat_storage_options(
+    endpoint: String,
+    region: String,
+    access: String,
+    secret: String,
+) -> HashMap<String, String> {
+    HashMap::from([
+        ("aws_access_key_id".into(), access),
+        ("aws_secret_access_key".into(), secret),
+        ("aws_endpoint".into(), endpoint),
+        ("aws_region".into(), region),
+        ("aws_virtual_hosted_style_request".into(), "false".into()),
+    ])
+}
+
+fn r2_storage_options() -> Option<HashMap<String, String>> {
+    Some(compat_storage_options(
+        std::env::var("R2_ENDPOINT").ok()?,
+        "auto".into(),
+        std::env::var("R2_ACCESS_KEY").ok()?,
+        std::env::var("R2_SECRET_KEY").ok()?,
+    ))
+}
+
+fn tigris_storage_options() -> Option<HashMap<String, String>> {
+    Some(compat_storage_options(
+        std::env::var("TIGRIS_ENDPOINT").ok()?,
+        "auto".into(),
+        std::env::var("TIGRIS_ACCESS_KEY").ok()?,
+        std::env::var("TIGRIS_SECRET_KEY").ok()?,
+    ))
+}
+
+fn b2_storage_options() -> Option<HashMap<String, String>> {
+    Some(compat_storage_options(
+        std::env::var("B2_ENDPOINT").ok()?,
+        std::env::var("B2_REGION").unwrap_or_else(|_| "us-west-004".into()),
+        std::env::var("B2_ACCESS_KEY").ok()?,
+        std::env::var("B2_SECRET_KEY").ok()?,
+    ))
+}
+
+fn gcs_storage_options() -> Option<HashMap<String, String>> {
+    Some(compat_storage_options(
+        std::env::var("GCS_ENDPOINT").ok()?,
+        std::env::var("GCS_REGION").unwrap_or_else(|_| "auto".into()),
+        std::env::var("GCS_ACCESS_KEY").ok()?,
+        std::env::var("GCS_SECRET_KEY").ok()?,
+    ))
+}
+
 async fn connect(uri: &str, opts: &HashMap<String, String>) -> lancedb::Connection {
     lancedb::connect(uri)
         .storage_options(opts.clone())
@@ -168,7 +226,7 @@ async fn concurrent_writers_preserve_all_rows_minio() {
 #[ignore]
 async fn concurrent_writers_preserve_all_rows_aws() {
     if std::env::var("AWS_PROFILE").is_err() {
-        eprintln!("SKIP: AWS_PROFILE not set — real-AWS spike-2b needs a configured CLI profile");
+        eprintln!("SKIP: AWS_PROFILE not set; real-AWS spike-2b needs a configured CLI profile");
         return;
     }
     let bucket = env_or("FIRNFLOW_AWS_BUCKET", "firnflow-cloudfloe");
@@ -198,7 +256,7 @@ async fn concurrent_writers_100_runs_minio() {
 #[ignore]
 async fn concurrent_writers_100_runs_aws() {
     if std::env::var("AWS_PROFILE").is_err() {
-        eprintln!("SKIP: AWS_PROFILE not set — real-AWS spike-2b needs a configured CLI profile");
+        eprintln!("SKIP: AWS_PROFILE not set; real-AWS spike-2b needs a configured CLI profile");
         return;
     }
     const RUNS: usize = 100;
@@ -209,6 +267,150 @@ async fn concurrent_writers_100_runs_aws() {
         run_stress(uri_base.clone(), opts.clone()).await;
         if run % 10 == 0 {
             eprintln!("aws run {run}/{RUNS} passed");
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// R2 / Tigris / B2: extended provider validation.
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writers_preserve_all_rows_r2() {
+    let Some(opts) = r2_storage_options() else {
+        eprintln!("SKIP: R2_ENDPOINT/R2_ACCESS_KEY/R2_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("R2_BUCKET") else {
+        eprintln!("SKIP: R2_BUCKET not set");
+        return;
+    };
+    run_stress(format!("s3://{bucket}"), opts).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writers_100_runs_r2() {
+    let Some(opts) = r2_storage_options() else {
+        eprintln!("SKIP: R2_ENDPOINT/R2_ACCESS_KEY/R2_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("R2_BUCKET") else {
+        eprintln!("SKIP: R2_BUCKET not set");
+        return;
+    };
+    const RUNS: usize = 100;
+    let uri_base = format!("s3://{bucket}");
+    for run in 1..=RUNS {
+        run_stress(uri_base.clone(), opts.clone()).await;
+        if run % 10 == 0 {
+            eprintln!("r2 run {run}/{RUNS} passed");
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writers_preserve_all_rows_tigris() {
+    let Some(opts) = tigris_storage_options() else {
+        eprintln!("SKIP: TIGRIS_ENDPOINT/TIGRIS_ACCESS_KEY/TIGRIS_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("TIGRIS_BUCKET") else {
+        eprintln!("SKIP: TIGRIS_BUCKET not set");
+        return;
+    };
+    run_stress(format!("s3://{bucket}"), opts).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writers_100_runs_tigris() {
+    let Some(opts) = tigris_storage_options() else {
+        eprintln!("SKIP: TIGRIS_ENDPOINT/TIGRIS_ACCESS_KEY/TIGRIS_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("TIGRIS_BUCKET") else {
+        eprintln!("SKIP: TIGRIS_BUCKET not set");
+        return;
+    };
+    const RUNS: usize = 100;
+    let uri_base = format!("s3://{bucket}");
+    for run in 1..=RUNS {
+        run_stress(uri_base.clone(), opts.clone()).await;
+        if run % 10 == 0 {
+            eprintln!("tigris run {run}/{RUNS} passed");
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writers_preserve_all_rows_b2() {
+    let Some(opts) = b2_storage_options() else {
+        eprintln!("SKIP: B2_ENDPOINT/B2_ACCESS_KEY/B2_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("B2_BUCKET") else {
+        eprintln!("SKIP: B2_BUCKET not set");
+        return;
+    };
+    run_stress(format!("s3://{bucket}"), opts).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writers_100_runs_b2() {
+    let Some(opts) = b2_storage_options() else {
+        eprintln!("SKIP: B2_ENDPOINT/B2_ACCESS_KEY/B2_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("B2_BUCKET") else {
+        eprintln!("SKIP: B2_BUCKET not set");
+        return;
+    };
+    const RUNS: usize = 100;
+    let uri_base = format!("s3://{bucket}");
+    for run in 1..=RUNS {
+        run_stress(uri_base.clone(), opts.clone()).await;
+        if run % 10 == 0 {
+            eprintln!("b2 run {run}/{RUNS} passed");
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writers_preserve_all_rows_gcs() {
+    let Some(opts) = gcs_storage_options() else {
+        eprintln!("SKIP: GCS_ENDPOINT/GCS_ACCESS_KEY/GCS_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("GCS_BUCKET") else {
+        eprintln!("SKIP: GCS_BUCKET not set");
+        return;
+    };
+    run_stress(format!("s3://{bucket}"), opts).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writers_100_runs_gcs() {
+    let Some(opts) = gcs_storage_options() else {
+        eprintln!("SKIP: GCS_ENDPOINT/GCS_ACCESS_KEY/GCS_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("GCS_BUCKET") else {
+        eprintln!("SKIP: GCS_BUCKET not set");
+        return;
+    };
+    const RUNS: usize = 100;
+    let uri_base = format!("s3://{bucket}");
+    for run in 1..=RUNS {
+        run_stress(uri_base.clone(), opts.clone()).await;
+        if run % 10 == 0 {
+            eprintln!("gcs run {run}/{RUNS} passed");
         }
     }
 }

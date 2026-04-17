@@ -66,6 +66,58 @@ async fn aws_client() -> Client {
     Client::new(&shared)
 }
 
+/// Generic S3-compatible client for providers exposing an explicit
+/// endpoint + static keys. Virtual-hosted style (path-style off):
+/// R2, Tigris, and B2's S3 compat layers all accept it.
+fn compat_client(endpoint: String, region: &str, access: String, secret: String) -> Client {
+    let credentials = Credentials::new(access, secret, None, None, "firnflow-test");
+    let config = Config::builder()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new(region.to_string()))
+        .endpoint_url(endpoint)
+        .credentials_provider(credentials)
+        .force_path_style(false)
+        .build();
+    Client::from_conf(config)
+}
+
+/// Cloudflare R2. Region is `auto`, virtual-hosted style.
+async fn r2_client() -> Option<Client> {
+    let endpoint = std::env::var("R2_ENDPOINT").ok()?;
+    let access = std::env::var("R2_ACCESS_KEY").ok()?;
+    let secret = std::env::var("R2_SECRET_KEY").ok()?;
+    Some(compat_client(endpoint, "auto", access, secret))
+}
+
+/// Tigris. Region is `auto`, virtual-hosted style.
+async fn tigris_client() -> Option<Client> {
+    let endpoint = std::env::var("TIGRIS_ENDPOINT").ok()?;
+    let access = std::env::var("TIGRIS_ACCESS_KEY").ok()?;
+    let secret = std::env::var("TIGRIS_SECRET_KEY").ok()?;
+    Some(compat_client(endpoint, "auto", access, secret))
+}
+
+/// Backblaze B2. Region is encoded in the endpoint (e.g.
+/// `s3.eu-central-003.backblazeb2.com` maps to `eu-central-003`).
+async fn b2_client() -> Option<Client> {
+    let endpoint = std::env::var("B2_ENDPOINT").ok()?;
+    let access = std::env::var("B2_ACCESS_KEY").ok()?;
+    let secret = std::env::var("B2_SECRET_KEY").ok()?;
+    let region = std::env::var("B2_REGION").unwrap_or_else(|_| "us-west-004".into());
+    Some(compat_client(endpoint, &region, access, secret))
+}
+
+/// Google Cloud Storage via the XML / Interoperability API. Region
+/// default picks one half of a typical dual-region; any valid GCS
+/// region name works for signing, and `auto` is also accepted.
+async fn gcs_client() -> Option<Client> {
+    let endpoint = std::env::var("GCS_ENDPOINT").ok()?;
+    let access = std::env::var("GCS_ACCESS_KEY").ok()?;
+    let secret = std::env::var("GCS_SECRET_KEY").ok()?;
+    let region = std::env::var("GCS_REGION").unwrap_or_else(|_| "auto".into());
+    Some(compat_client(endpoint, &region, access, secret))
+}
+
 async fn ensure_bucket(client: &Client, bucket: &str) {
     // CreateBucket is effectively idempotent for our purposes: any
     // real failure (credentials, network, region, ownership) will
@@ -74,7 +126,7 @@ async fn ensure_bucket(client: &Client, bucket: &str) {
 }
 
 /// The shared assertion: two PUTs with `If-None-Match: *` to the same
-/// key — first must succeed, second must fail with HTTP 412.
+/// key. First must succeed, second must fail with HTTP 412.
 async fn assert_if_none_match_rejects_second_put(client: &Client, bucket: &str) {
     let key = unique_key("spike2/cond-write");
 
@@ -96,7 +148,7 @@ async fn assert_if_none_match_rejects_second_put(client: &Client, bucket: &str) 
         .if_none_match("*")
         .send()
         .await
-        .expect_err("second PUT with If-None-Match=* must fail — the key already exists");
+        .expect_err("second PUT with If-None-Match=* must fail because the key already exists");
 
     let status = match &err {
         SdkError::ServiceError(e) => e.raw().status().as_u16(),
@@ -106,7 +158,7 @@ async fn assert_if_none_match_rejects_second_put(client: &Client, bucket: &str) 
         status, 412,
         "backend must return 412 Precondition Failed on the second If-None-Match=* PUT; \
          got {status}. A backend that silently ignores the precondition will pass at low \
-         contention and fail Lance's CAS-based WAL under load — do not proceed to spike-2b."
+         contention and fail Lance's CAS-based WAL under load, so do not proceed to spike-2b."
     );
 
     // Best-effort cleanup; leaked keys are harmless for a throwaway bucket.
@@ -126,7 +178,7 @@ async fn put_object_with_if_none_match_rejects_second_write_minio() {
 #[ignore]
 async fn put_object_with_if_none_match_rejects_second_write_aws() {
     if std::env::var("AWS_PROFILE").is_err() {
-        eprintln!("SKIP: AWS_PROFILE not set — real-AWS pre-flight needs a configured CLI profile");
+        eprintln!("SKIP: AWS_PROFILE not set; real-AWS pre-flight needs a configured CLI profile");
         return;
     }
     let client = aws_client().await;
@@ -136,5 +188,61 @@ async fn put_object_with_if_none_match_rejects_second_write_aws() {
     // remain reusable across runs; a CreateBucket attempt in the wrong
     // region (or against a name that's globally taken) gives worse
     // errors than a straightforward PutObject failure.
+    assert_if_none_match_rejects_second_put(&client, &bucket).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn put_object_with_if_none_match_rejects_second_write_r2() {
+    let Some(client) = r2_client().await else {
+        eprintln!("SKIP: R2_ENDPOINT/R2_ACCESS_KEY/R2_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("R2_BUCKET") else {
+        eprintln!("SKIP: R2_BUCKET not set");
+        return;
+    };
+    assert_if_none_match_rejects_second_put(&client, &bucket).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn put_object_with_if_none_match_rejects_second_write_tigris() {
+    let Some(client) = tigris_client().await else {
+        eprintln!("SKIP: TIGRIS_ENDPOINT/TIGRIS_ACCESS_KEY/TIGRIS_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("TIGRIS_BUCKET") else {
+        eprintln!("SKIP: TIGRIS_BUCKET not set");
+        return;
+    };
+    assert_if_none_match_rejects_second_put(&client, &bucket).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn put_object_with_if_none_match_rejects_second_write_b2() {
+    let Some(client) = b2_client().await else {
+        eprintln!("SKIP: B2_ENDPOINT/B2_ACCESS_KEY/B2_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("B2_BUCKET") else {
+        eprintln!("SKIP: B2_BUCKET not set");
+        return;
+    };
+    assert_if_none_match_rejects_second_put(&client, &bucket).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn put_object_with_if_none_match_rejects_second_write_gcs() {
+    let Some(client) = gcs_client().await else {
+        eprintln!("SKIP: GCS_ENDPOINT/GCS_ACCESS_KEY/GCS_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("GCS_BUCKET") else {
+        eprintln!("SKIP: GCS_BUCKET not set");
+        return;
+    };
     assert_if_none_match_rejects_second_put(&client, &bucket).await;
 }
