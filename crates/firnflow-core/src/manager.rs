@@ -11,11 +11,13 @@
 //! - **read from the Lance table schema** when re-opening an
 //!   existing namespace.
 //!
-//! Resolved dimensions are cached in a `DashMap<NamespaceId, usize>`
-//! so the schema-read / first-row-inference happens at most once per
-//! namespace per process lifetime. Entries stay until the process
-//! restarts or the namespace is deleted (in which case the stale
-//! entry is evicted lazily on next use).
+//! Resolved schema facts — the vector dimension and whether the
+//! table carries the `_ingested_at` system column — are cached in a
+//! `DashMap<NamespaceId, NamespaceSchemaInfo>` so the schema-read /
+//! first-row-inference happens at most once per namespace per process
+//! lifetime. Entries stay until the process restarts or the namespace
+//! is deleted (in which case the stale entry is evicted lazily on
+//! next use).
 //!
 //! **Connection pooling (issue #1):** each namespace's
 //! `lancedb::Connection` + `lancedb::Table` are cached in a
@@ -423,10 +425,10 @@ impl NamespaceManager {
     /// Remove every object under a namespace prefix from the
     /// underlying object store.
     ///
-    /// Also evicts the cached dimension **and** the pooled
-    /// connection/table handle for this namespace so that a
-    /// subsequent upsert can establish a new dimension against a
-    /// fresh Lance table.
+    /// Also evicts the cached schema info (dimension +
+    /// `_ingested_at` flag) **and** the pooled connection/table
+    /// handle for this namespace so that a subsequent upsert can
+    /// establish a new dimension against a fresh Lance table.
     ///
     /// Returns the number of objects deleted. The caller
     /// (`NamespaceService::delete`) is responsible for invalidating
@@ -713,6 +715,14 @@ impl NamespaceManager {
     ) -> Result<ListPage, FirnflowError> {
         let limit = limit.clamp(1, LIST_MAX_LIMIT);
 
+        // Every successful list call makes S3 requests (manifest +
+        // data reads via lance). Record one tick so the
+        // `firnflow_s3_requests_total{operation="list"}` counter
+        // preserves the cost-visibility story even though this path
+        // bypasses `NamespaceService`, where the other operations
+        // record theirs.
+        self.metrics.record_s3_request(ns, "list");
+
         let info = match self.resolve_schema_info(ns).await? {
             Some(i) => i,
             None => {
@@ -797,8 +807,10 @@ impl NamespaceManager {
 }
 
 /// Encode a `(timestamp_micros, id)` pair as a 32-character hex
-/// cursor. Opaque on the wire; the handler round-trips it via
-/// [`decode_list_cursor`].
+/// cursor. The encoding is implementation-defined and may change —
+/// clients must treat the returned string as an opaque token and
+/// round-trip it verbatim via [`decode_list_cursor`]. Parsing the
+/// bytes or constructing cursors by hand is not supported.
 pub fn encode_list_cursor(ts_micros: i64, id: u64) -> String {
     format!("{:016x}{:016x}", ts_micros as u64, id)
 }
