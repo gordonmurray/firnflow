@@ -7,10 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-18
+
 ### Added
 - `GET /ns/{namespace}/list` — a narrow, cursor-paginated endpoint for "recent content" flows. Ordered by a new reserved system column `_ingested_at` (microsecond timestamp, populated at first write, never mutated). Supports `order_by=_ingested_at` only in v1, `order=asc|desc`, `limit` (default 50, capped at 500), and an opaque hex cursor. Bypasses the foyer cache so pagination tails do not pollute hot query entries (issue #22).
 - `NamespaceManager::list` + `encode_list_cursor` / `decode_list_cursor` helpers. Cursor format is a 32-char hex encoding of `(timestamp_micros, id)` for stable continuation under concurrent writes.
 - `FirnflowError::Unsupported` variant mapped to HTTP 501 for namespaces whose tables pre-date the `_ingested_at` column.
+- `firnflow_s3_requests_total{operation="list"}` is now recorded for every list call so `/list` participates in the cost-visibility story even though it bypasses `NamespaceService`.
 
 ### Changed
 - `NamespaceManager` now caches `(dim, has_ingested_at)` per namespace (`schema_info` replaces the old `dims` DashMap). Existing namespaces without `_ingested_at` continue to accept upserts against their original schema; only the `/list` endpoint rejects them with 501.
