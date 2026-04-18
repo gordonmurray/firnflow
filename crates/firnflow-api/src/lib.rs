@@ -27,6 +27,7 @@ pub fn router(state: AppState) -> Router {
         .route("/ns/{namespace}", delete(handlers::delete))
         .route("/ns/{namespace}/upsert", post(handlers::upsert))
         .route("/ns/{namespace}/query", post(handlers::query))
+        .route("/ns/{namespace}/list", get(handlers::list))
         .route("/ns/{namespace}/warmup", post(handlers::warmup))
         .route("/ns/{namespace}/index", post(handlers::create_index))
         .route(

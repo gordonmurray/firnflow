@@ -202,6 +202,60 @@
       </div>
     </div>
 
+    <!-- GET /ns/{ns}/list -->
+    <div class="endpoint">
+      <div class="endpoint-header" aria-expanded="true">
+        <span class="method method-get">GET</span>
+        <span class="endpoint-path">/ns/{namespace}/list</span>
+        <span class="endpoint-desc">Cursor-paginated list ordered by <code>_ingested_at</code></span>
+      </div>
+      <div class="endpoint-body">
+        <p>Returns rows in ingest order for "recent content" flows (landing pages, new-uploads feeds, back-catalogue browsing). Results are ordered by the reserved <code>_ingested_at</code> system column (microsecond server-side timestamp, set at first write and never mutated).</p>
+        <p>This endpoint intentionally bypasses the foyer cache. Pagination tails would push hot query results out of RAM and NVMe without an offsetting hit rate, so <code>/list</code> goes directly to the Lance dataset.</p>
+
+        <h4>Query parameters</h4>
+        <table>
+          <thead><tr><th>Param</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>order_by</code></td><td><code>_ingested_at</code></td><td>V1 supports the reserved system column only; other values return 400. User-column ordering will follow scalar-index support.</td></tr>
+            <tr><td><code>order</code></td><td><code>desc</code></td><td><code>asc</code> or <code>desc</code>.</td></tr>
+            <tr><td><code>limit</code></td><td>50</td><td>Rows per page. Hard-capped at 500.</td></tr>
+            <tr><td><code>cursor</code></td><td>none</td><td>Opaque token from the previous response's <code>next_cursor</code>. Value-based, survives concurrent writes. Format is implementation-defined — do not parse or construct by hand.</td></tr>
+          </tbody>
+        </table>
+
+        <h4>Response (200)</h4>
+        <table>
+          <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>rows</code></td><td>array</td><td>Rows in the requested order</td></tr>
+            <tr><td><code>rows[].id</code></td><td>u64</td><td>Row identifier</td></tr>
+            <tr><td><code>rows[].vector</code></td><td>float32[]</td><td>The stored vector</td></tr>
+            <tr><td><code>rows[].text</code></td><td>string?</td><td>The stored text (null if none)</td></tr>
+            <tr><td><code>rows[].ingested_at_micros</code></td><td>i64</td><td>Server-side microsecond timestamp the row was first written</td></tr>
+            <tr><td><code>next_cursor</code></td><td>string?</td><td>Pass verbatim as <code>?cursor=</code> on the next call; <code>null</code> on the final page</td></tr>
+          </tbody>
+        </table>
+
+        <h4>Status codes</h4>
+        <table>
+          <thead><tr><th>Code</th><th>When</th></tr></thead>
+          <tbody>
+            <tr><td>200</td><td>Success</td></tr>
+            <tr><td>400</td><td>Invalid <code>order_by</code>, malformed <code>cursor</code>, or <code>limit</code> over 500</td></tr>
+            <tr><td>501</td><td>Namespace's Lance table pre-dates the <code>_ingested_at</code> column; recreate the namespace to enable the endpoint</td></tr>
+          </tbody>
+        </table>
+
+        <h4>Examples</h4>
+        <p>First page, newest first:</p>
+        <pre><code>curl 'http://localhost:3000/ns/demo/list?limit=50'</code></pre>
+
+        <p>Next page via cursor:</p>
+        <pre><code>curl 'http://localhost:3000/ns/demo/list?limit=50&amp;cursor=0006012a9abb9c800000000000000007'</code></pre>
+      </div>
+    </div>
+
     <!-- DELETE /ns/{ns} -->
     <div class="endpoint">
       <div class="endpoint-header" aria-expanded="true">

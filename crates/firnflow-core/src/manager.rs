@@ -11,11 +11,13 @@
 //! - **read from the Lance table schema** when re-opening an
 //!   existing namespace.
 //!
-//! Resolved dimensions are cached in a `DashMap<NamespaceId, usize>`
-//! so the schema-read / first-row-inference happens at most once per
-//! namespace per process lifetime. Entries stay until the process
-//! restarts or the namespace is deleted (in which case the stale
-//! entry is evicted lazily on next use).
+//! Resolved schema facts — the vector dimension and whether the
+//! table carries the `_ingested_at` system column — are cached in a
+//! `DashMap<NamespaceId, NamespaceSchemaInfo>` so the schema-read /
+//! first-row-inference happens at most once per namespace per process
+//! lifetime. Entries stay until the process restarts or the namespace
+//! is deleted (in which case the stale entry is evicted lazily on
+//! next use).
 //!
 //! **Connection pooling (issue #1):** each namespace's
 //! `lancedb::Connection` + `lancedb::Table` are cached in a
@@ -32,15 +34,17 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::builder::{FixedSizeListBuilder, Float32Builder, StringBuilder};
 use arrow_array::{
     Array, ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator,
-    RecordBatchReader, StringArray, UInt64Array,
+    RecordBatchReader, StringArray, TimestampMicrosecondArray, UInt64Array,
 };
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use dashmap::DashMap;
 use futures::{StreamExt, TryStreamExt};
+use lance::dataset::scanner::ColumnOrdering;
 use lancedb::index::scalar::{FtsIndexBuilder, FullTextSearchQuery};
 use lancedb::index::vector::IvfPqIndexBuilder;
 use lancedb::index::Index;
@@ -53,12 +57,29 @@ use object_store::ObjectStore;
 
 use crate::metrics::CoreMetrics;
 use crate::query::DEFAULT_NPROBES;
+use crate::result::{ListOrder, ListPage, ListRow};
 use crate::{FirnflowError, NamespaceId, QueryResult, QueryResultSet};
 
 const TABLE_NAME: &str = "data";
 const DISTANCE_COLUMN: &str = "_distance";
 const SCORE_COLUMN: &str = "_score";
 const RELEVANCE_COLUMN: &str = "_relevance_score";
+const INGESTED_AT_COLUMN: &str = "_ingested_at";
+
+/// Maximum `limit` the `list` endpoint will honour per request.
+/// Hard-capped to bound in-memory sort cost while the v1 endpoint
+/// lacks scalar-index pushdown.
+pub const LIST_MAX_LIMIT: usize = 500;
+
+/// Per-namespace schema facts cached after the first table open.
+/// Both the resolved vector dimension and whether the table
+/// carries the `_ingested_at` system column come from the same
+/// schema read and are stored together.
+#[derive(Debug, Clone, Copy)]
+struct NamespaceSchemaInfo {
+    dim: usize,
+    has_ingested_at: bool,
+}
 
 /// A single row for upsert into a namespace.
 #[derive(Debug, Clone)]
@@ -108,9 +129,11 @@ struct NamespaceHandle {
 pub struct NamespaceManager {
     bucket: String,
     storage_options: HashMap<String, String>,
-    /// Per-namespace resolved dimensions. Populated on first
-    /// interaction with each namespace (upsert or query).
-    dims: DashMap<NamespaceId, usize>,
+    /// Per-namespace schema facts. Populated on first interaction
+    /// (upsert or query). Carries the resolved vector dimension and
+    /// a flag for whether the underlying Lance table has the
+    /// `_ingested_at` column that the `list` endpoint relies on.
+    schema_info: DashMap<NamespaceId, NamespaceSchemaInfo>,
     /// Per-namespace connection + table handles. Populated lazily
     /// by [`NamespaceManager::get_or_open_table`] and evicted on
     /// namespace delete / index build / compaction.
@@ -145,7 +168,7 @@ impl NamespaceManager {
         Self {
             bucket: bucket.into(),
             storage_options,
-            dims: DashMap::new(),
+            schema_info: DashMap::new(),
             handles: DashMap::new(),
             metrics,
         }
@@ -155,7 +178,17 @@ impl NamespaceManager {
     /// `None` for namespaces the manager has not yet interacted
     /// with.
     pub fn dim_for(&self, ns: &NamespaceId) -> Option<usize> {
-        self.dims.get(ns).map(|r| *r)
+        self.schema_info.get(ns).map(|r| r.dim)
+    }
+
+    /// Whether the namespace's Lance table carries the
+    /// `_ingested_at` system column required by the `list` endpoint.
+    /// Returns `None` for namespaces the manager has not yet
+    /// interacted with. `Some(false)` is returned for namespaces
+    /// whose tables were created before `_ingested_at` existed; the
+    /// list endpoint surfaces this as HTTP 501.
+    pub fn supports_list(&self, ns: &NamespaceId) -> Option<bool> {
+        self.schema_info.get(ns).map(|r| r.has_ingested_at)
     }
 
     /// Number of namespaces currently holding a pooled
@@ -177,8 +210,14 @@ impl NamespaceManager {
         format!("s3://{}/{}", self.bucket, ns.as_str())
     }
 
-    fn schema_for_dim(dim: usize) -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
+    /// Build the Arrow schema for a namespace's Lance table.
+    ///
+    /// `with_ingested_at` controls whether the trailing
+    /// `_ingested_at` system column is included. Fresh namespaces
+    /// always use `true`; appends into pre-existing tables pass
+    /// whatever the live table schema reports so the batch matches.
+    fn schema_for_dim(dim: usize, with_ingested_at: bool) -> Arc<Schema> {
+        let mut fields = vec![
             Field::new("id", DataType::UInt64, false),
             Field::new(
                 "vector",
@@ -189,7 +228,15 @@ impl NamespaceManager {
                 false,
             ),
             Field::new("text", DataType::Utf8, true),
-        ]))
+        ];
+        if with_ingested_at {
+            fields.push(Field::new(
+                INGESTED_AT_COLUMN,
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ));
+        }
+        Arc::new(Schema::new(fields))
     }
 
     async fn connect(&self, ns: &NamespaceId) -> Result<lancedb::Connection, FirnflowError> {
@@ -232,6 +279,12 @@ impl NamespaceManager {
     /// fresh one is created with the `dim`-shaped schema. The
     /// resulting handle is cached in `self.handles` so the next
     /// caller hits the fast path.
+    /// Return a cached `lancedb::Table` for `ns`, opening (and if
+    /// necessary, creating) one on a cache miss.
+    ///
+    /// When the table must be created, it is built with the current
+    /// schema (including `_ingested_at`). If the table already
+    /// exists it is opened as-is — no schema migration is attempted.
     async fn get_or_open_table(
         &self,
         ns: &NamespaceId,
@@ -245,8 +298,10 @@ impl NamespaceManager {
         let table = match conn.open_table(TABLE_NAME).execute().await {
             Ok(tbl) => tbl,
             Err(_) => {
-                let schema = Self::schema_for_dim(dim);
-                let empty = rows_to_batch(&schema, dim, Vec::new())?;
+                // Fresh namespace: always create with the current
+                // schema, which includes `_ingested_at`.
+                let schema = Self::schema_for_dim(dim, true);
+                let empty = rows_to_batch(&schema, dim, Vec::new(), true)?;
                 let reader: Box<dyn RecordBatchReader + Send> =
                     Box::new(RecordBatchIterator::new(vec![Ok(empty)], schema));
                 conn.create_table(TABLE_NAME, reader)
@@ -262,43 +317,46 @@ impl NamespaceManager {
     }
 
     /// Try to open an existing table for `ns` without creating one.
-    /// Used by [`resolve_dim`] to discover a namespace's dimension
-    /// from its persisted schema. On success the handle is cached
-    /// so the subsequent operation avoids a second `open_table`.
+    /// Used by [`resolve_schema_info`] to discover a namespace's
+    /// dimension and ingested-at support from its persisted schema.
+    /// On success the handle is cached so the subsequent operation
+    /// avoids a second `open_table`.
     async fn open_existing(
         &self,
         ns: &NamespaceId,
-    ) -> Result<Option<(lancedb::Table, usize)>, FirnflowError> {
+    ) -> Result<Option<(lancedb::Table, NamespaceSchemaInfo)>, FirnflowError> {
         if let Some(entry) = self.handles.get(ns) {
             let tbl = entry.table.clone();
             drop(entry);
-            let dim = read_dim_from_table(&tbl).await?;
-            return Ok(Some((tbl, dim)));
+            let info = read_schema_info_from_table(&tbl).await?;
+            return Ok(Some((tbl, info)));
         }
 
         let conn = self.connect(ns).await?;
         match conn.open_table(TABLE_NAME).execute().await {
             Ok(tbl) => {
-                let dim = read_dim_from_table(&tbl).await?;
+                let info = read_schema_info_from_table(&tbl).await?;
                 self.cache_handle(ns, conn, tbl.clone());
-                Ok(Some((tbl, dim)))
+                Ok(Some((tbl, info)))
             }
             Err(_) => Ok(None),
         }
     }
 
-    /// Resolve the dimension for a namespace:
+    /// Resolve the schema facts for a namespace:
     /// 1. Check the in-memory cache.
     /// 2. Try reading from the existing Lance table schema.
     /// 3. Return `None` if the namespace doesn't exist yet.
-    async fn resolve_dim(&self, ns: &NamespaceId) -> Result<Option<usize>, FirnflowError> {
-        if let Some(dim) = self.dims.get(ns) {
-            return Ok(Some(*dim));
+    async fn resolve_schema_info(
+        &self,
+        ns: &NamespaceId,
+    ) -> Result<Option<NamespaceSchemaInfo>, FirnflowError> {
+        if let Some(info) = self.schema_info.get(ns) {
+            return Ok(Some(*info));
         }
-        // Not cached — try opening the table.
-        if let Some((_tbl, dim)) = self.open_existing(ns).await? {
-            self.dims.insert(ns.clone(), dim);
-            return Ok(Some(dim));
+        if let Some((_tbl, info)) = self.open_existing(ns).await? {
+            self.schema_info.insert(ns.clone(), info);
+            return Ok(Some(info));
         }
         Ok(None)
     }
@@ -319,34 +377,40 @@ impl NamespaceManager {
             return Ok(());
         }
 
-        // Determine the dimension: cached → schema-read → infer from row[0].
-        let dim = match self.resolve_dim(ns).await? {
-            Some(d) => d,
+        // Determine schema facts: cached → live schema → infer for
+        // a fresh namespace. Fresh namespaces always get the current
+        // schema (with `_ingested_at`); pre-upgrade tables keep their
+        // legacy shape so appends continue to work.
+        let info = match self.resolve_schema_info(ns).await? {
+            Some(info) => info,
             None => {
-                let d = rows[0].vector.len();
-                if d == 0 {
+                let dim = rows[0].vector.len();
+                if dim == 0 {
                     return Err(FirnflowError::InvalidRequest(
                         "row id 0: vector is empty".into(),
                     ));
                 }
-                d
+                NamespaceSchemaInfo {
+                    dim,
+                    has_ingested_at: true,
+                }
             }
         };
 
-        // Validate every row.
         for row in &rows {
-            if row.vector.len() != dim {
+            if row.vector.len() != info.dim {
                 return Err(FirnflowError::InvalidRequest(format!(
-                    "row id {}: vector length {}, expected {dim}",
+                    "row id {}: vector length {}, expected {}",
                     row.id,
                     row.vector.len(),
+                    info.dim,
                 )));
             }
         }
 
-        let tbl = self.get_or_open_table(ns, dim).await?;
-        let schema = Self::schema_for_dim(dim);
-        let batch = rows_to_batch(&schema, dim, rows)?;
+        let tbl = self.get_or_open_table(ns, info.dim).await?;
+        let schema = Self::schema_for_dim(info.dim, info.has_ingested_at);
+        let batch = rows_to_batch(&schema, info.dim, rows, info.has_ingested_at)?;
         let reader: Box<dyn RecordBatchReader + Send> =
             Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema));
         tbl.add(reader)
@@ -354,18 +418,17 @@ impl NamespaceManager {
             .await
             .map_err(|e| FirnflowError::Backend(format!("table.add: {e}")))?;
 
-        // Cache the dimension now that the write succeeded.
-        self.dims.insert(ns.clone(), dim);
+        self.schema_info.insert(ns.clone(), info);
         Ok(())
     }
 
     /// Remove every object under a namespace prefix from the
     /// underlying object store.
     ///
-    /// Also evicts the cached dimension **and** the pooled
-    /// connection/table handle for this namespace so that a
-    /// subsequent upsert can establish a new dimension against a
-    /// fresh Lance table.
+    /// Also evicts the cached schema info (dimension +
+    /// `_ingested_at` flag) **and** the pooled connection/table
+    /// handle for this namespace so that a subsequent upsert can
+    /// establish a new dimension against a fresh Lance table.
     ///
     /// Returns the number of objects deleted. The caller
     /// (`NamespaceService::delete`) is responsible for invalidating
@@ -386,8 +449,9 @@ impl NamespaceManager {
             count += 1;
         }
 
-        // Evict dim + pooled handle so a fresh upsert can pick a new dim.
-        self.dims.remove(ns);
+        // Evict cached schema info + pooled handle so a fresh
+        // upsert can pick a new dim.
+        self.schema_info.remove(ns);
         self.evict_handle(ns);
 
         Ok(count)
@@ -436,8 +500,8 @@ impl NamespaceManager {
         nprobes: Option<usize>,
         text: Option<String>,
     ) -> Result<QueryResultSet, FirnflowError> {
-        let dim = match self.resolve_dim(ns).await? {
-            Some(d) => d,
+        let dim = match self.resolve_schema_info(ns).await? {
+            Some(info) => info.dim,
             None => {
                 return Ok(QueryResultSet {
                     query_id: String::new(),
@@ -519,11 +583,15 @@ impl NamespaceManager {
         num_partitions: Option<u32>,
         num_sub_vectors: Option<u32>,
     ) -> Result<(), FirnflowError> {
-        let dim = self.resolve_dim(ns).await?.ok_or_else(|| {
-            FirnflowError::InvalidRequest(format!(
-                "cannot index namespace {ns}: no data has been upserted yet"
-            ))
-        })?;
+        let dim = self
+            .resolve_schema_info(ns)
+            .await?
+            .ok_or_else(|| {
+                FirnflowError::InvalidRequest(format!(
+                    "cannot index namespace {ns}: no data has been upserted yet"
+                ))
+            })?
+            .dim;
 
         let tbl = self.get_or_open_table(ns, dim).await?;
 
@@ -552,11 +620,15 @@ impl NamespaceManager {
     /// column. Requires that at least some rows have been upserted
     /// with non-null `text` values.
     pub async fn create_fts_index(&self, ns: &NamespaceId) -> Result<(), FirnflowError> {
-        let dim = self.resolve_dim(ns).await?.ok_or_else(|| {
-            FirnflowError::InvalidRequest(format!(
-                "cannot create FTS index on namespace {ns}: no data has been upserted yet"
-            ))
-        })?;
+        let dim = self
+            .resolve_schema_info(ns)
+            .await?
+            .ok_or_else(|| {
+                FirnflowError::InvalidRequest(format!(
+                    "cannot create FTS index on namespace {ns}: no data has been upserted yet"
+                ))
+            })?
+            .dim;
 
         let tbl = self.get_or_open_table(ns, dim).await?;
         tbl.create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
@@ -580,11 +652,15 @@ impl NamespaceManager {
     /// Like `create_index`, this is a potentially expensive
     /// operation and the caller should run it in a background task.
     pub async fn compact(&self, ns: &NamespaceId) -> Result<CompactResult, FirnflowError> {
-        let dim = self.resolve_dim(ns).await?.ok_or_else(|| {
-            FirnflowError::InvalidRequest(format!(
-                "cannot compact namespace {ns}: no data has been upserted yet"
-            ))
-        })?;
+        let dim = self
+            .resolve_schema_info(ns)
+            .await?
+            .ok_or_else(|| {
+                FirnflowError::InvalidRequest(format!(
+                    "cannot compact namespace {ns}: no data has been upserted yet"
+                ))
+            })?
+            .dim;
 
         let tbl = self.get_or_open_table(ns, dim).await?;
         let stats = tbl
@@ -606,6 +682,153 @@ impl NamespaceManager {
             fragments_added: added,
         })
     }
+
+    /// List rows from a namespace in `_ingested_at` order.
+    ///
+    /// This path deliberately does **not** participate in the foyer
+    /// cache — paginated scans would push hot query results out
+    /// with cold, one-shot list entries. Callers are expected to
+    /// invoke the manager directly.
+    ///
+    /// `limit` is clamped to [`LIST_MAX_LIMIT`]; `cursor` is the
+    /// `(timestamp_micros, id)` pair taken from the last row of the
+    /// previous page and filters out rows that appeared earlier in
+    /// the chosen order.
+    ///
+    /// Returns [`FirnflowError::Unsupported`] on namespaces whose
+    /// tables pre-date the `_ingested_at` column (HTTP 501 at the
+    /// API layer).
+    ///
+    /// **V1 performance note:** LanceDB 0.27's high-level query
+    /// API does not expose scalar-index ordering. The implementation
+    /// drops through to `lance::Dataset::scan()` with
+    /// `order_by`, which triggers a full scan of the fragments
+    /// matching the cursor filter before returning the first batch.
+    /// Acceptable for small-to-medium namespaces; a scalar index on
+    /// `_ingested_at` is the follow-up for scale.
+    pub async fn list(
+        &self,
+        ns: &NamespaceId,
+        limit: usize,
+        order: ListOrder,
+        cursor: Option<(i64, u64)>,
+    ) -> Result<ListPage, FirnflowError> {
+        let limit = limit.clamp(1, LIST_MAX_LIMIT);
+
+        // Every successful list call makes S3 requests (manifest +
+        // data reads via lance). Record one tick so the
+        // `firnflow_s3_requests_total{operation="list"}` counter
+        // preserves the cost-visibility story even though this path
+        // bypasses `NamespaceService`, where the other operations
+        // record theirs.
+        self.metrics.record_s3_request(ns, "list");
+
+        let info = match self.resolve_schema_info(ns).await? {
+            Some(i) => i,
+            None => {
+                return Ok(ListPage {
+                    rows: Vec::new(),
+                    next_cursor: None,
+                });
+            }
+        };
+        if !info.has_ingested_at {
+            return Err(FirnflowError::Unsupported(format!(
+                "namespace {ns} pre-dates the _ingested_at column; \
+                 recreate the namespace or wait for the migration follow-up"
+            )));
+        }
+
+        let tbl = self.get_or_open_table(ns, info.dim).await?;
+        let dataset_wrapper = tbl
+            .dataset()
+            .ok_or_else(|| FirnflowError::Backend("list requires a native lance table".into()))?;
+        let dataset = dataset_wrapper
+            .get()
+            .await
+            .map_err(|e| FirnflowError::Backend(format!("resolve dataset: {e}")))?;
+
+        let mut scan = dataset.scan();
+
+        if let Some((ts, id)) = cursor {
+            let filter = match order {
+                ListOrder::Desc => format!(
+                    "({INGESTED_AT_COLUMN} < to_timestamp_micros({ts})) \
+                     OR ({INGESTED_AT_COLUMN} = to_timestamp_micros({ts}) AND id < {id})"
+                ),
+                ListOrder::Asc => format!(
+                    "({INGESTED_AT_COLUMN} > to_timestamp_micros({ts})) \
+                     OR ({INGESTED_AT_COLUMN} = to_timestamp_micros({ts}) AND id > {id})"
+                ),
+            };
+            scan.filter(&filter)
+                .map_err(|e| FirnflowError::Backend(format!("scan.filter: {e}")))?;
+        }
+
+        let ordering = match order {
+            ListOrder::Desc => vec![
+                ColumnOrdering::desc_nulls_last(INGESTED_AT_COLUMN.to_string()),
+                ColumnOrdering::desc_nulls_last("id".to_string()),
+            ],
+            ListOrder::Asc => vec![
+                ColumnOrdering::asc_nulls_first(INGESTED_AT_COLUMN.to_string()),
+                ColumnOrdering::asc_nulls_first("id".to_string()),
+            ],
+        };
+        scan.order_by(Some(ordering))
+            .map_err(|e| FirnflowError::Backend(format!("scan.order_by: {e}")))?;
+
+        // Pull `limit + 1` so we can derive the next cursor and
+        // flag "no more pages" in one pass.
+        scan.limit(Some((limit + 1) as i64), None)
+            .map_err(|e| FirnflowError::Backend(format!("scan.limit: {e}")))?;
+
+        let stream = scan
+            .try_into_stream()
+            .await
+            .map_err(|e| FirnflowError::Backend(format!("scan.try_into_stream: {e}")))?;
+        let batches: Vec<RecordBatch> = stream
+            .try_collect()
+            .await
+            .map_err(|e| FirnflowError::Backend(format!("scan.collect: {e}")))?;
+
+        let mut rows = batches_to_list_rows(&batches)?;
+
+        let next_cursor = if rows.len() > limit {
+            rows.truncate(limit);
+            rows.last()
+                .map(|r| encode_list_cursor(r.ingested_at_micros, r.id))
+        } else {
+            None
+        };
+
+        Ok(ListPage { rows, next_cursor })
+    }
+}
+
+/// Encode a `(timestamp_micros, id)` pair as a 32-character hex
+/// cursor. The encoding is implementation-defined and may change —
+/// clients must treat the returned string as an opaque token and
+/// round-trip it verbatim via [`decode_list_cursor`]. Parsing the
+/// bytes or constructing cursors by hand is not supported.
+pub fn encode_list_cursor(ts_micros: i64, id: u64) -> String {
+    format!("{:016x}{:016x}", ts_micros as u64, id)
+}
+
+/// Decode a cursor produced by [`encode_list_cursor`]. Returns an
+/// [`FirnflowError::InvalidRequest`] on malformed input so the API
+/// layer can return a 400 verbatim.
+pub fn decode_list_cursor(cursor: &str) -> Result<(i64, u64), FirnflowError> {
+    if cursor.len() != 32 || !cursor.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(FirnflowError::InvalidRequest(format!(
+            "malformed cursor {cursor:?}: expected 32 hex characters"
+        )));
+    }
+    let ts = u64::from_str_radix(&cursor[..16], 16)
+        .map_err(|e| FirnflowError::InvalidRequest(format!("cursor timestamp: {e}")))?;
+    let id = u64::from_str_radix(&cursor[16..], 16)
+        .map_err(|e| FirnflowError::InvalidRequest(format!("cursor id: {e}")))?;
+    Ok((ts as i64, id))
 }
 
 /// Result of a compaction operation, exposing the fragment delta.
@@ -617,29 +840,62 @@ pub struct CompactResult {
     pub fragments_added: usize,
 }
 
-/// Read the vector dimension from a Lance table's schema by
-/// inspecting the `FixedSizeList.list_size` of the `vector` column.
-async fn read_dim_from_table(tbl: &lancedb::Table) -> Result<usize, FirnflowError> {
+/// Read the schema facts (vector dimension, `_ingested_at` presence)
+/// from a Lance table in one pass. The dimension comes from the
+/// `FixedSizeList.list_size` of the `vector` column; the flag is set
+/// when a column named `_ingested_at` with a `Timestamp(Microsecond)`
+/// type is present.
+async fn read_schema_info_from_table(
+    tbl: &lancedb::Table,
+) -> Result<NamespaceSchemaInfo, FirnflowError> {
     let schema = tbl
         .schema()
         .await
         .map_err(|e| FirnflowError::Backend(format!("read schema: {e}")))?;
+    let mut dim: Option<usize> = None;
+    let mut has_ingested_at = false;
     for field in schema.fields() {
-        if field.name() == "vector" {
-            if let DataType::FixedSizeList(_, size) = field.data_type() {
-                return Ok(*size as usize);
+        match field.name().as_str() {
+            "vector" => {
+                if let DataType::FixedSizeList(_, size) = field.data_type() {
+                    dim = Some(*size as usize);
+                }
             }
+            INGESTED_AT_COLUMN => {
+                if matches!(
+                    field.data_type(),
+                    DataType::Timestamp(TimeUnit::Microsecond, _)
+                ) {
+                    has_ingested_at = true;
+                }
+            }
+            _ => {}
         }
     }
-    Err(FirnflowError::Backend(
-        "table schema has no FixedSizeList 'vector' column".into(),
-    ))
+    let dim = dim.ok_or_else(|| {
+        FirnflowError::Backend("table schema has no FixedSizeList 'vector' column".into())
+    })?;
+    Ok(NamespaceSchemaInfo {
+        dim,
+        has_ingested_at,
+    })
+}
+
+/// Server-clock reading in microseconds since the Unix epoch.
+/// Negative clock skew or pre-epoch system clocks are clamped to 0 —
+/// the column is a write-time stamp, not a system clock health check.
+fn current_micros() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
 }
 
 fn rows_to_batch(
     schema: &Arc<Schema>,
     dim: usize,
     rows: Vec<UpsertRow>,
+    include_ingested_at: bool,
 ) -> Result<RecordBatch, FirnflowError> {
     let n = rows.len();
     let ids = UInt64Array::from_iter_values(rows.iter().map(|r| r.id));
@@ -663,15 +919,24 @@ fn rows_to_batch(
     }
     let texts = text_builder.finish();
 
-    RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(ids) as ArrayRef,
-            Arc::new(vectors) as ArrayRef,
-            Arc::new(texts) as ArrayRef,
-        ],
-    )
-    .map_err(|e| FirnflowError::Backend(format!("batch build: {e}")))
+    let mut columns: Vec<ArrayRef> = vec![
+        Arc::new(ids) as ArrayRef,
+        Arc::new(vectors) as ArrayRef,
+        Arc::new(texts) as ArrayRef,
+    ];
+
+    if include_ingested_at {
+        // Stamp every row in the batch with the same server-side
+        // timestamp. Because Lance appends are immutable, this
+        // becomes the row's permanent "arrival" time — first-write
+        // semantics fall out of the append-only model for free.
+        let ts = current_micros();
+        let ts_array = TimestampMicrosecondArray::from_iter_values(std::iter::repeat_n(ts, n));
+        columns.push(Arc::new(ts_array) as ArrayRef);
+    }
+
+    RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| FirnflowError::Backend(format!("batch build: {e}")))
 }
 
 /// Find the score column in a result batch. Lance uses different
@@ -688,6 +953,58 @@ fn find_score_column(batch: &RecordBatch) -> Option<&Float32Array> {
         }
     }
     None
+}
+
+fn batches_to_list_rows(batches: &[RecordBatch]) -> Result<Vec<ListRow>, FirnflowError> {
+    let mut out = Vec::new();
+    for batch in batches {
+        let ids = batch
+            .column_by_name("id")
+            .ok_or_else(|| FirnflowError::Backend("list: missing id column".into()))?
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .ok_or_else(|| FirnflowError::Backend("list: id not UInt64".into()))?;
+        let vectors = batch
+            .column_by_name("vector")
+            .ok_or_else(|| FirnflowError::Backend("list: missing vector column".into()))?
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .ok_or_else(|| FirnflowError::Backend("list: vector not FixedSizeList".into()))?;
+        let texts = batch
+            .column_by_name("text")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let ingested_at = batch
+            .column_by_name(INGESTED_AT_COLUMN)
+            .ok_or_else(|| FirnflowError::Backend("list: missing _ingested_at column".into()))?
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .ok_or_else(|| {
+                FirnflowError::Backend("list: _ingested_at not Timestamp(Microsecond)".into())
+            })?;
+
+        for row in 0..batch.num_rows() {
+            let vector_arr = vectors.value(row);
+            let vec_f32 = vector_arr
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| FirnflowError::Backend("list: vector inner not Float32".into()))?;
+            let vector: Vec<f32> = (0..vec_f32.len()).map(|i| vec_f32.value(i)).collect();
+            let text = texts.and_then(|t| {
+                if t.is_null(row) {
+                    None
+                } else {
+                    Some(t.value(row).to_owned())
+                }
+            });
+            out.push(ListRow {
+                id: ids.value(row),
+                vector,
+                text,
+                ingested_at_micros: ingested_at.value(row),
+            });
+        }
+    }
+    Ok(out)
 }
 
 fn batches_to_results(batches: &[RecordBatch]) -> Result<Vec<QueryResult>, FirnflowError> {
@@ -744,4 +1061,36 @@ fn batches_to_results(batches: &[RecordBatch]) -> Result<Vec<QueryResult>, Firnf
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_round_trip() {
+        for (ts, id) in [
+            (0_i64, 0_u64),
+            (1, 1),
+            (i64::MAX, u64::MAX),
+            (1_700_000_000_000_000, 42),
+        ] {
+            let encoded = encode_list_cursor(ts, id);
+            assert_eq!(encoded.len(), 32);
+            let (ts2, id2) = decode_list_cursor(&encoded).expect("decode");
+            assert_eq!((ts, id), (ts2, id2));
+        }
+    }
+
+    #[test]
+    fn cursor_rejects_bad_length() {
+        assert!(decode_list_cursor("").is_err());
+        assert!(decode_list_cursor("abcd").is_err());
+        assert!(decode_list_cursor(&"a".repeat(33)).is_err());
+    }
+
+    #[test]
+    fn cursor_rejects_non_hex() {
+        assert!(decode_list_cursor(&"z".repeat(32)).is_err());
+    }
 }

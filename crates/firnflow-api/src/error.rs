@@ -32,6 +32,9 @@ impl IntoResponse for ApiError {
             FirnflowError::InvalidRequest(msg) => {
                 (StatusCode::BAD_REQUEST, format!("invalid request: {msg}"))
             }
+            FirnflowError::Unsupported(msg) => {
+                (StatusCode::NOT_IMPLEMENTED, format!("not supported: {msg}"))
+            }
             err @ (FirnflowError::Backend(_)
             | FirnflowError::Cache(_)
             | FirnflowError::Io(_)

@@ -16,9 +16,12 @@ pub mod result;
 pub mod service;
 
 pub use error::FirnflowError;
-pub use manager::{CompactResult, NamespaceManager, UpsertRow};
+pub use manager::{
+    decode_list_cursor, encode_list_cursor, CompactResult, NamespaceManager, UpsertRow,
+    LIST_MAX_LIMIT,
+};
 pub use metrics::CoreMetrics;
 pub use namespace::NamespaceId;
 pub use query::{IndexRequest, QueryRequest};
-pub use result::{QueryResult, QueryResultSet};
+pub use result::{ListOrder, ListPage, ListRow, QueryResult, QueryResultSet};
 pub use service::NamespaceService;
