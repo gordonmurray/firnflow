@@ -26,6 +26,12 @@ pub enum FirnflowError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 
+    /// The requested operation is not supported on this namespace,
+    /// typically because its schema pre-dates a feature. Maps to
+    /// HTTP 501 at the API layer.
+    #[error("operation not supported on this namespace: {0}")]
+    Unsupported(String),
+
     /// A metrics registry or encoding operation failed.
     #[error("metrics error: {0}")]
     Metrics(String),

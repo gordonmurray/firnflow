@@ -83,8 +83,16 @@ async fn build_app() -> (axum::Router, tempfile::TempDir) {
         .await
         .unwrap(),
     );
-    let service = Arc::new(NamespaceService::new(manager, cache, Arc::clone(&metrics)));
-    let app = router(AppState { service, metrics });
+    let service = Arc::new(NamespaceService::new(
+        Arc::clone(&manager),
+        cache,
+        Arc::clone(&metrics),
+    ));
+    let app = router(AppState {
+        service,
+        manager,
+        metrics,
+    });
     (app, tmp)
 }
 

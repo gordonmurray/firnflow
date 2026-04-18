@@ -16,7 +16,13 @@ use crate::config::AppConfig;
 #[derive(Clone)]
 pub struct AppState {
     /// Service facade combining the cache and the namespace manager.
+    /// Every cached read/write path goes through this.
     pub service: Arc<NamespaceService>,
+    /// Direct manager handle for the one endpoint that intentionally
+    /// bypasses the foyer cache (the `/list` path). Shares its
+    /// underlying `NamespaceManager` with `service`; holding a
+    /// separate `Arc` makes the architectural split explicit.
+    pub manager: Arc<NamespaceManager>,
     /// Shared metrics registry; the `/metrics` handler encodes
     /// this into the Prometheus text format.
     pub metrics: Arc<CoreMetrics>,
@@ -56,6 +62,14 @@ pub async fn build_state(cfg: &AppConfig) -> anyhow::Result<AppState> {
         .map_err(|e| anyhow::anyhow!("build namespace cache: {e}"))?,
     );
 
-    let service = Arc::new(NamespaceService::new(manager, cache, Arc::clone(&metrics)));
-    Ok(AppState { service, metrics })
+    let service = Arc::new(NamespaceService::new(
+        Arc::clone(&manager),
+        cache,
+        Arc::clone(&metrics),
+    ));
+    Ok(AppState {
+        service,
+        manager,
+        metrics,
+    })
 }

@@ -3,14 +3,17 @@
 //! * `GET    /health`
 //! * `POST   /ns/{namespace}/upsert`
 //! * `POST   /ns/{namespace}/query`
+//! * `GET    /ns/{namespace}/list`
 //! * `DELETE /ns/{namespace}`
 //! * `POST   /ns/{namespace}/warmup`
 //! * `POST   /ns/{namespace}/index`
+//! * `POST   /ns/{namespace}/fts-index`
+//! * `POST   /ns/{namespace}/compact`
 //! * `GET    /metrics`
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -18,7 +21,8 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use firnflow_core::{
-    IndexRequest, NamespaceId, QueryRequest, QueryResultSet, UpsertRow as CoreUpsertRow,
+    decode_list_cursor, FirnflowError, IndexRequest, ListOrder, ListPage, NamespaceId,
+    QueryRequest, QueryResultSet, UpsertRow as CoreUpsertRow, LIST_MAX_LIMIT,
 };
 
 use crate::error::ApiError;
@@ -292,6 +296,79 @@ pub async fn compact(
             status: "compaction queued".into(),
         }),
     ))
+}
+
+const DEFAULT_LIST_LIMIT: usize = 50;
+const LIST_ORDER_BY: &str = "_ingested_at";
+
+/// Query parameters for `GET /ns/{namespace}/list`.
+///
+/// All fields are optional to keep simple "give me the latest"
+/// clients to a bare path. Defaults: `order_by=_ingested_at`,
+/// `order=desc`, `limit=50`, no cursor.
+#[derive(Debug, Deserialize)]
+pub struct ListParams {
+    #[serde(default)]
+    pub order_by: Option<String>,
+    #[serde(default)]
+    pub order: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// List rows in a namespace ordered by `_ingested_at`.
+///
+/// Deliberately **does not** go through `NamespaceService`: pagination
+/// tails would pollute the foyer cache with cold one-shot entries. The
+/// handler calls `state.manager.list(...)` directly.
+pub async fn list(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+    Query(params): Query<ListParams>,
+) -> Result<Json<ListPage>, ApiError> {
+    let ns = NamespaceId::new(namespace)?;
+
+    // V1 only supports `_ingested_at`. User-column ordering is
+    // gated behind scalar-index support, which is a separate issue.
+    if let Some(col) = params.order_by.as_deref() {
+        if col != LIST_ORDER_BY {
+            return Err(ApiError(FirnflowError::InvalidRequest(format!(
+                "order_by must be {LIST_ORDER_BY:?} in v1, got {col:?}"
+            ))));
+        }
+    }
+
+    let order = match params.order.as_deref().unwrap_or("desc") {
+        "desc" => ListOrder::Desc,
+        "asc" => ListOrder::Asc,
+        other => {
+            return Err(ApiError(FirnflowError::InvalidRequest(format!(
+                "order must be \"asc\" or \"desc\", got {other:?}"
+            ))));
+        }
+    };
+
+    let limit = params.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+    if limit == 0 {
+        return Err(ApiError(FirnflowError::InvalidRequest(
+            "limit must be >= 1".into(),
+        )));
+    }
+    if limit > LIST_MAX_LIMIT {
+        return Err(ApiError(FirnflowError::InvalidRequest(format!(
+            "limit {limit} exceeds maximum {LIST_MAX_LIMIT}"
+        ))));
+    }
+
+    let cursor = match params.cursor.as_deref() {
+        Some(raw) if !raw.is_empty() => Some(decode_list_cursor(raw)?),
+        _ => None,
+    };
+
+    let page = state.manager.list(&ns, limit, order, cursor).await?;
+    Ok(Json(page))
 }
 
 /// Prometheus scrape endpoint. Serialises the process-wide

@@ -108,6 +108,7 @@ curl http://localhost:3000/metrics | grep s3_requests
 | `/ns/{ns}` | `DELETE` | Removes all data (S3 + Cache) for a namespace |
 | `/ns/{ns}/upsert` | `POST` | Insert/update vectors and data |
 | `/ns/{ns}/query` | `POST` | Vector, FTS, or hybrid search |
+| `/ns/{ns}/list` | `GET` | Cursor-paginated list ordered by `_ingested_at` |
 | `/ns/{ns}/warmup` | `POST` | Non-blocking cache pre-warm hint |
 | `/ns/{ns}/index` | `POST` | Build IVF_PQ vector index (async, returns 202) |
 | `/ns/{ns}/fts-index` | `POST` | Build BM25 full-text search index (async, returns 202) |

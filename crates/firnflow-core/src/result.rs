@@ -37,3 +37,44 @@ pub struct QueryResultSet {
     /// Search hits, already ranked by the underlying engine.
     pub results: Vec<QueryResult>,
 }
+
+/// Sort order for the `list` endpoint. Descending returns newest
+/// rows first and is the intended default for "recent content" flows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListOrder {
+    /// Oldest first.
+    Asc,
+    /// Newest first.
+    Desc,
+}
+
+/// A single row returned by the list endpoint. Deliberately distinct
+/// from [`QueryResult`] — there is no score (the endpoint does not
+/// rank by similarity) and there is an ingest timestamp.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListRow {
+    /// Stable row id from the underlying Lance table.
+    pub id: u64,
+    /// The stored vector for this row. Width matches the
+    /// namespace's dimension.
+    pub vector: Vec<f32>,
+    /// The stored text for this row, if any.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Server-side timestamp (microseconds since Unix epoch) the
+    /// row was first written. Immutable for the life of the row —
+    /// Lance appends never rewrite it.
+    pub ingested_at_micros: i64,
+}
+
+/// A page of list results plus an opaque cursor for the next page.
+/// `next_cursor` is `None` when the server returned the final page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListPage {
+    /// Rows in the requested order.
+    pub rows: Vec<ListRow>,
+    /// Opaque cursor to pass as `?cursor=` on the next call, or
+    /// `None` if no further rows are available in the chosen order.
+    pub next_cursor: Option<String>,
+}
