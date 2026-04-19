@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Tigris is now a validated storage backend. The 2026-04-17 concurrent-stress failure (silent write loss under contention on both dual-region and single-region buckets) was fixed upstream. A 2026-04-19 re-run of the 100-iteration stress passed cleanly on both `firn-tigris-bucket` (dual-region, 375 s) and `firn-tigris-single-region` (291 s). The README compatibility matrix and `notes/providers/tigris.md` are updated; the original failure record is preserved in the provider writeup for provenance.
+
 ## [0.3.0] - 2026-04-18
 
 ### Added
@@ -79,6 +82,7 @@ development through phases 1 through 8 before being made public;
   benchmark at dim=1536, 100k rows available at
   `bench/results/cold_vs_warm_aws.md`.
 
-[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/gordonmurray/firnflow/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/gordonmurray/firnflow/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/gordonmurray/firnflow/releases/tag/v0.1.0
