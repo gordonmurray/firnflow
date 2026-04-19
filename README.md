@@ -1,6 +1,6 @@
 # Firn
 
-**Firn** is a high-performance, multi-tenant vector and full-text search engine backed by object storage (AWS S3, MinIO, Cloudflare R2). It is designed as a credible open-source alternative to turbopuffer, proving that a professional-grade tiered storage architecture (**RAM → NVMe → S3**) is achievable entirely from open-source components. See [Storage backends](#storage-backends) for the full compatibility matrix.
+**Firn** is a high-performance, multi-tenant vector and full-text search engine backed by object storage (AWS S3, MinIO, Cloudflare R2, Tigris). It is designed as a credible open-source alternative to turbopuffer, proving that a professional-grade tiered storage architecture (**RAM → NVMe → S3**) is achievable entirely from open-source components. See [Storage backends](#storage-backends) for the full compatibility matrix.
 
 The cost efficiency of S3 with the speed of local RAM. A multi-tenant vector and full-text search engine backed by S3. Built with LanceDB and Foyer for microsecond-scale search latency on top of object storage.
 
@@ -45,7 +45,7 @@ Firn's correctness depends on S3's `If-None-Match: *` precondition behaving as a
 | **MinIO** (self-hosted / local) | ✅ | Reference implementation for the S3 protocol; clean pass on 100-run stress. |
 | **Cloudflare R2** | ✅ | `If-None-Match: *` honoured correctly; 100-run stress clean. Per-iteration latency is roughly 7x AWS due to R2's multi-region commit path, but correctness is what the gate checks. Zero egress makes this the most interesting non-AWS target. Use path-style addressing. |
 | **Backblaze B2** (S3 compat layer) | ❌ | Returns `HTTP 501 NotImplemented` on the first PutObject with `If-None-Match: *`. B2's native API supports conditional writes via `X-Bz-*` headers, but the S3-compat gateway does not translate them. Loud failure: easy to detect, not usable for Firn. |
-| **Tigris** (dual-region + single-region) | ❌ | Passes the sequential pre-flight but loses whole writer batches under concurrent stress. Dual-region: 0/6 runs clean. Single-region: 3/10 runs clean, 7/10 lost 1 to 3 writers. CAS primitive is not strictly linearisable even within a single region. |
+| **Tigris** (dual-region + single-region) | ✅ | `If-None-Match: *` honoured on concurrent commits; 100-run stress clean on both dual-region and single-region buckets as of 2026-04-19 after an upstream CAS fix. Per-iteration wall time sits between AWS `eu-west-1` and Cloudflare R2. The original 2026-04-17 failure (silent write loss under concurrency) is preserved in `notes/providers/tigris.md` for provenance. Use path-style addressing on `t3.storage.dev`. |
 | **Google Cloud Storage** (via S3 interop) | ❌ | Silently ignores `If-None-Match: *`: the second conditional PUT returns `200 OK` instead of `412`. Concurrent stress loses 6/8 writers every run, deterministically. GCS's native `x-goog-if-generation-match: 0` works correctly; only the S3-interop translation is broken. A future release could support GCS via LanceDB's native GCS backend rather than the S3 layer. |
 
 The two dedicated tests live at `crates/firnflow-core/tests/s3_conditional_writes.rs` and `crates/firnflow-core/tests/lance_concurrent_writes.rs`. Both are `#[ignore]`'d and require credentials to run. If you want to evaluate a backend not in the table, copy a block from either file and point it at your own bucket.
