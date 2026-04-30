@@ -156,6 +156,15 @@ fn gcs_storage_options() -> Option<HashMap<String, String>> {
     ))
 }
 
+fn spaces_storage_options() -> Option<HashMap<String, String>> {
+    Some(compat_storage_options(
+        std::env::var("SPACES_ENDPOINT").ok()?,
+        std::env::var("SPACES_REGION").unwrap_or_else(|_| "us-east-1".into()),
+        std::env::var("SPACES_ACCESS_KEY").ok()?,
+        std::env::var("SPACES_SECRET_KEY").ok()?,
+    ))
+}
+
 async fn connect(uri: &str, opts: &HashMap<String, String>) -> lancedb::Connection {
     lancedb::connect(uri)
         .storage_options(opts.clone())
@@ -376,6 +385,41 @@ async fn concurrent_writers_100_runs_b2() {
         run_stress(uri_base.clone(), opts.clone()).await;
         if run % 10 == 0 {
             eprintln!("b2 run {run}/{RUNS} passed");
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writers_preserve_all_rows_spaces() {
+    let Some(opts) = spaces_storage_options() else {
+        eprintln!("SKIP: SPACES_ENDPOINT/SPACES_ACCESS_KEY/SPACES_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("SPACES_BUCKET") else {
+        eprintln!("SKIP: SPACES_BUCKET not set");
+        return;
+    };
+    run_stress(format!("s3://{bucket}"), opts).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writers_100_runs_spaces() {
+    let Some(opts) = spaces_storage_options() else {
+        eprintln!("SKIP: SPACES_ENDPOINT/SPACES_ACCESS_KEY/SPACES_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("SPACES_BUCKET") else {
+        eprintln!("SKIP: SPACES_BUCKET not set");
+        return;
+    };
+    const RUNS: usize = 100;
+    let uri_base = format!("s3://{bucket}");
+    for run in 1..=RUNS {
+        run_stress(uri_base.clone(), opts.clone()).await;
+        if run % 10 == 0 {
+            eprintln!("spaces run {run}/{RUNS} passed");
         }
     }
 }

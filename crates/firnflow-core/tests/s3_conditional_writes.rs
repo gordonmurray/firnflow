@@ -107,6 +107,19 @@ async fn b2_client() -> Option<Client> {
     Some(compat_client(endpoint, &region, access, secret))
 }
 
+/// DigitalOcean Spaces. Regional endpoint
+/// (e.g. `https://lon1.digitaloceanspaces.com`); SigV4 signing region
+/// defaults to `us-east-1` per DO's S3-compat docs but can be overridden
+/// with `SPACES_REGION` if the regional code (`lon1`, `nyc3`, ...) is
+/// required by a future Spaces release.
+async fn spaces_client() -> Option<Client> {
+    let endpoint = std::env::var("SPACES_ENDPOINT").ok()?;
+    let access = std::env::var("SPACES_ACCESS_KEY").ok()?;
+    let secret = std::env::var("SPACES_SECRET_KEY").ok()?;
+    let region = std::env::var("SPACES_REGION").unwrap_or_else(|_| "us-east-1".into());
+    Some(compat_client(endpoint, &region, access, secret))
+}
+
 /// Google Cloud Storage via the XML / Interoperability API. Region
 /// default picks one half of a typical dual-region; any valid GCS
 /// region name works for signing, and `auto` is also accepted.
@@ -228,6 +241,20 @@ async fn put_object_with_if_none_match_rejects_second_write_b2() {
     };
     let Ok(bucket) = std::env::var("B2_BUCKET") else {
         eprintln!("SKIP: B2_BUCKET not set");
+        return;
+    };
+    assert_if_none_match_rejects_second_put(&client, &bucket).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn put_object_with_if_none_match_rejects_second_write_spaces() {
+    let Some(client) = spaces_client().await else {
+        eprintln!("SKIP: SPACES_ENDPOINT/SPACES_ACCESS_KEY/SPACES_SECRET_KEY not set");
+        return;
+    };
+    let Ok(bucket) = std::env::var("SPACES_BUCKET") else {
+        eprintln!("SKIP: SPACES_BUCKET not set");
         return;
     };
     assert_if_none_match_rejects_second_put(&client, &bucket).await;
