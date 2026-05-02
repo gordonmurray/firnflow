@@ -34,6 +34,10 @@ pub fn router(state: AppState) -> Router {
             "/ns/{namespace}/fts-index",
             post(handlers::create_fts_index),
         )
+        .route(
+            "/ns/{namespace}/scalar-index",
+            post(handlers::create_scalar_index),
+        )
         .route("/ns/{namespace}/compact", post(handlers::compact))
         .with_state(state)
 }

@@ -45,7 +45,7 @@ use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use dashmap::DashMap;
 use futures::{StreamExt, TryStreamExt};
 use lance::dataset::scanner::ColumnOrdering;
-use lancedb::index::scalar::{FtsIndexBuilder, FullTextSearchQuery};
+use lancedb::index::scalar::{BTreeIndexBuilder, FtsIndexBuilder, FullTextSearchQuery};
 use lancedb::index::vector::IvfPqIndexBuilder;
 use lancedb::index::Index;
 use lancedb::query::{ExecutableQuery, QueryBase};
@@ -70,6 +70,13 @@ const INGESTED_AT_COLUMN: &str = "_ingested_at";
 /// Hard-capped to bound in-memory sort cost while the v1 endpoint
 /// lacks scalar-index pushdown.
 pub const LIST_MAX_LIMIT: usize = 500;
+
+/// Columns the v1 `/scalar-index` endpoint will build a BTree on.
+/// Locked to `_ingested_at` to mirror the same constraint the
+/// `/list` endpoint puts on `order_by` — the BTree only earns its
+/// keep on columns the query path actually filters or orders by.
+/// Future user-column ordering work extends this slice.
+const SCALAR_INDEX_COLUMNS: &[&str] = &[INGESTED_AT_COLUMN];
 
 /// Per-namespace schema facts cached after the first table open.
 /// Both the resolved vector dimension and whether the table
@@ -637,6 +644,63 @@ impl NamespaceManager {
             .map_err(|e| FirnflowError::Backend(format!("create_fts_index: {e}")))?;
 
         // Same manifest-bump rationale as `create_index`.
+        self.evict_handle(ns);
+        Ok(())
+    }
+
+    /// Build a BTree scalar index on a namespace column.
+    ///
+    /// v1 only accepts `_ingested_at` (see [`SCALAR_INDEX_COLUMNS`]).
+    /// The index lets `/list` cursor pages do an index range scan
+    /// instead of a full-fragment scan and lets the leading
+    /// `ORDER BY _ingested_at` short-circuit the in-memory sort.
+    ///
+    /// Idempotent: `lancedb`'s `IndexBuilder` defaults to
+    /// `replace=true`, so a repeat call rebuilds the index in place
+    /// rather than failing.
+    ///
+    /// Returns [`FirnflowError::Unsupported`] for namespaces whose
+    /// tables pre-date the `_ingested_at` column — same gate the
+    /// `/list` endpoint applies.
+    ///
+    /// Like the other index builders, this is potentially expensive
+    /// on large tables; the API handler runs it in a background task.
+    pub async fn create_scalar_index(
+        &self,
+        ns: &NamespaceId,
+        column: &str,
+    ) -> Result<(), FirnflowError> {
+        if !SCALAR_INDEX_COLUMNS.contains(&column) {
+            return Err(FirnflowError::InvalidRequest(format!(
+                "scalar index column {column:?} is not supported in v1; \
+                 valid columns: {SCALAR_INDEX_COLUMNS:?}"
+            )));
+        }
+
+        let info = self.resolve_schema_info(ns).await?.ok_or_else(|| {
+            FirnflowError::InvalidRequest(format!(
+                "cannot create scalar index on namespace {ns}: no data has been upserted yet"
+            ))
+        })?;
+
+        if column == INGESTED_AT_COLUMN && !info.has_ingested_at {
+            return Err(FirnflowError::Unsupported(format!(
+                "namespace {ns} pre-dates the _ingested_at column; \
+                 recreate the namespace before building a scalar index on it"
+            )));
+        }
+
+        let tbl = self.get_or_open_table(ns, info.dim).await?;
+        tbl.create_index(&[column], Index::BTree(BTreeIndexBuilder::default()))
+            .execute()
+            .await
+            .map_err(|e| FirnflowError::Backend(format!("create_scalar_index: {e}")))?;
+
+        // Same manifest-bump rationale as `create_index` /
+        // `create_fts_index`. Note: `OptimizeAction::All` (used by
+        // `compact()`) runs `optimize_indices` which absorbs new rows
+        // into the BTree without retraining, so callers do **not**
+        // need to re-run `create_scalar_index` after a compaction.
         self.evict_handle(ns);
         Ok(())
     }

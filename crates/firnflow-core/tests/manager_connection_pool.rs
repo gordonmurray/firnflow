@@ -239,3 +239,49 @@ async fn handle_evicted_after_compaction() {
     );
     assert_eq!(metrics.cached_handles_value(), 1);
 }
+
+#[tokio::test]
+#[ignore]
+async fn handle_evicted_after_scalar_index_build() {
+    // Issue #24: building a BTree scalar index bumps the table
+    // manifest the same way `create_index` and `create_fts_index`
+    // do, so the cached handle must be evicted to force the next
+    // operation to open a fresh Table view.
+    let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
+    let metrics = test_metrics();
+    let manager = NamespaceManager::new(bucket, minio_options(), Arc::clone(&metrics));
+    let ns = NamespaceId::new(unique_namespace("pool-scalar-index")).unwrap();
+
+    manager
+        .upsert(&ns, seed_rows(8))
+        .await
+        .expect("seed upsert");
+    assert!(manager.is_pooled(&ns), "pool populated after upsert");
+    assert_eq!(metrics.cached_handles_value(), 1);
+
+    manager
+        .create_scalar_index(&ns, "_ingested_at")
+        .await
+        .expect("scalar index build");
+    assert!(
+        !manager.is_pooled(&ns),
+        "scalar index build must evict the pooled handle"
+    );
+    assert_eq!(
+        metrics.cached_handles_value(),
+        0,
+        "gauge decremented by scalar-index eviction"
+    );
+
+    // Reject unsupported columns — the validation lives in
+    // `NamespaceManager::create_scalar_index`, not the API layer.
+    let err = manager
+        .create_scalar_index(&ns, "id")
+        .await
+        .expect_err("must reject non-whitelisted column");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not supported"),
+        "expected 'not supported' in error, got {msg}"
+    );
+}
