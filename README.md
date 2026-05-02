@@ -113,6 +113,7 @@ curl http://localhost:3000/metrics | grep s3_requests
 | `/ns/{ns}/warmup` | `POST` | Non-blocking cache pre-warm hint |
 | `/ns/{ns}/index` | `POST` | Build IVF_PQ vector index (async, returns 202) |
 | `/ns/{ns}/fts-index` | `POST` | Build BM25 full-text search index (async, returns 202) |
+| `/ns/{ns}/scalar-index` | `POST` | Build BTree index on `_ingested_at` to accelerate `/list` (async, returns 202) |
 | `/ns/{ns}/compact` | `POST` | Compact and prune data files (async, returns 202) |
 
 ## Development and Benchmarking

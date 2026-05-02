@@ -8,6 +8,7 @@
 //! * `POST   /ns/{namespace}/warmup`
 //! * `POST   /ns/{namespace}/index`
 //! * `POST   /ns/{namespace}/fts-index`
+//! * `POST   /ns/{namespace}/scalar-index`
 //! * `POST   /ns/{namespace}/compact`
 //! * `GET    /metrics`
 
@@ -245,6 +246,40 @@ pub async fn create_fts_index(
         StatusCode::ACCEPTED,
         Json(IndexResponse {
             status: "fts index build queued".into(),
+        }),
+    ))
+}
+
+/// Build a BTree scalar index on `_ingested_at`. Same 202-async
+/// pattern as `/fts-index`. The build runs in a tokio task; operators
+/// monitor `firnflow_index_build_duration_seconds{kind="scalar"}` for
+/// completion.
+///
+/// v1 hardcodes the column to `_ingested_at` to mirror the same
+/// constraint `/list` puts on `order_by`. Future user-column ordering
+/// adds a body parameter at that point.
+pub async fn create_scalar_index(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+) -> Result<(StatusCode, Json<IndexResponse>), ApiError> {
+    let ns = NamespaceId::new(namespace)?;
+
+    let service = Arc::clone(&state.service);
+    let ns_owned = ns.clone();
+    tokio::spawn(async move {
+        if let Err(e) = service.create_scalar_index(&ns_owned, "_ingested_at").await {
+            tracing::error!(
+                namespace = %ns_owned,
+                error = %e,
+                "scalar index build failed"
+            );
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(IndexResponse {
+            status: "scalar index build queued".into(),
         }),
     ))
 }

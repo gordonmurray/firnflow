@@ -217,7 +217,7 @@
         <table>
           <thead><tr><th>Param</th><th>Default</th><th>Description</th></tr></thead>
           <tbody>
-            <tr><td><code>order_by</code></td><td><code>_ingested_at</code></td><td>V1 supports the reserved system column only; other values return 400. User-column ordering will follow scalar-index support.</td></tr>
+            <tr><td><code>order_by</code></td><td><code>_ingested_at</code></td><td>V1 supports the reserved system column only; other values return 400. User-column ordering will follow scalar-index support. Build the BTree via <code>POST /ns/{namespace}/scalar-index</code> to remove the full-fragment scan cost on large namespaces.</td></tr>
             <tr><td><code>order</code></td><td><code>desc</code></td><td><code>asc</code> or <code>desc</code>.</td></tr>
             <tr><td><code>limit</code></td><td>50</td><td>Rows per page. Hard-capped at 500.</td></tr>
             <tr><td><code>cursor</code></td><td>none</td><td>Opaque token from the previous response's <code>next_cursor</code>. Value-based, survives concurrent writes. Format is implementation-defined — do not parse or construct by hand.</td></tr>
@@ -381,6 +381,32 @@
         <div class="callout callout-info">
           <div class="callout-title">Prerequisite</div>
           At least one row must have a non-null <code>text</code> field before building an FTS index.
+        </div>
+      </div>
+    </div>
+
+    <!-- POST /ns/{ns}/scalar-index -->
+    <div class="endpoint">
+      <div class="endpoint-header" aria-expanded="true">
+        <span class="method method-post">POST</span>
+        <span class="endpoint-path">/ns/{namespace}/scalar-index</span>
+        <span class="endpoint-desc">Build BTree index on <code>_ingested_at</code> to accelerate <code>/list</code> (async)</span>
+      </div>
+      <div class="endpoint-body">
+        <p>Builds a BTree scalar index on the reserved <code>_ingested_at</code> column. With the index in place, <code>/list</code> cursor pages do an index range scan instead of a full-fragment scan, and the leading <code>ORDER BY _ingested_at</code> short-circuits the in-memory sort step. Returns <code>202 Accepted</code>.</p>
+
+        <h4>Request body</h4>
+        <p>No request body required. v1 hardcodes the column to <code>_ingested_at</code> — the same constraint <code>/list</code> puts on <code>order_by</code>.</p>
+
+        <h4>Response (202)</h4>
+        <pre><code>{"status": "scalar index build queued"}</code></pre>
+
+        <h4>Example</h4>
+        <pre><code>curl -X POST http://localhost:3000/ns/demo/scalar-index</code></pre>
+
+        <div class="callout callout-info">
+          <div class="callout-title">Idempotent and self-maintaining</div>
+          Repeat calls rebuild the index in place. <code>POST /compact</code> incrementally absorbs new rows into the existing BTree, so a separate rebuild is not needed after compaction. Operators monitor <code>firnflow_index_build_duration_seconds{kind="scalar"}</code> for completion.
         </div>
       </div>
     </div>

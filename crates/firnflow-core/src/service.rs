@@ -192,6 +192,25 @@ impl NamespaceService {
         Ok(())
     }
 
+    /// Build a BTree scalar index on `column` (v1: `_ingested_at`
+    /// only). Records `firnflow_index_build_duration_seconds{kind="scalar"}`
+    /// on completion.
+    ///
+    /// Index build does **not** invalidate the cache: the index is
+    /// a pure read-path optimisation, the data underneath is unchanged.
+    pub async fn create_scalar_index(
+        &self,
+        ns: &NamespaceId,
+        column: &str,
+    ) -> Result<(), FirnflowError> {
+        let start = Instant::now();
+        self.metrics.record_s3_request(ns, "scalar_index");
+        self.manager.create_scalar_index(ns, column).await?;
+        self.metrics
+            .record_index_build(ns, "scalar", start.elapsed().as_secs_f64());
+        Ok(())
+    }
+
     /// Compact the namespace's data files.
     ///
     /// Records `firnflow_compaction_duration_seconds{namespace}` on
