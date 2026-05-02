@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-02
+
 ### Added
 - `POST /ns/{namespace}/scalar-index` — builds a BTree scalar index on the reserved `_ingested_at` column asynchronously (returns 202 Accepted). With the index in place, `/list` cursor pages do an index range scan instead of a full-fragment scan and the leading `ORDER BY _ingested_at` short-circuits the in-memory sort. The build runs in a tokio task and reports duration via `firnflow_index_build_duration_seconds{kind="scalar"}`. Idempotent (repeat calls rebuild in place); the cached connection/table handle is evicted on success in line with the existing manifest-bump rationale used by `/index` and `/fts-index`. `POST /compact` already runs `optimize_indices` after the file compaction step, so the BTree absorbs new rows incrementally — no separate rebuild trigger is needed after compaction. Closes #24.
 - DigitalOcean Spaces is a validated storage backend. The `If-None-Match: *` pre-flight returns 412 on the second PUT and a 100-iteration concurrent-writer stress run produced 800/800 rows on every iteration with zero discrepancies, validated against `firn-sample-bucket` in the London (`lon1`) region. Per-iteration wall time is ~3.10 s, the same performance class as AWS `eu-west-1` and the fastest non-AWS backend tested. The README compatibility matrix is updated; deployment requires the regional endpoint (`https://<region>.digitaloceanspaces.com`) and path-style addressing, the same client-side quirk that affects Cloudflare R2 and Tigris on `object_store` 0.12. Test functions live alongside the existing per-provider blocks in `crates/firnflow-core/tests/s3_conditional_writes.rs` and `crates/firnflow-core/tests/lance_concurrent_writes.rs`. Closes #29.
@@ -86,7 +88,8 @@ development through phases 1 through 8 before being made public;
   benchmark at dim=1536, 100k rows available at
   `bench/results/cold_vs_warm_aws.md`.
 
-[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/gordonmurray/firnflow/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/gordonmurray/firnflow/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/gordonmurray/firnflow/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/gordonmurray/firnflow/releases/tag/v0.1.0
