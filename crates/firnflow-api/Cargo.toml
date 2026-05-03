@@ -21,8 +21,11 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+tower.workspace = true
+tower_governor.workspace = true
+governor.workspace = true
+subtle.workspace = true
 firnflow-core = { path = "../firnflow-core" }
 
 [dev-dependencies]
-tower.workspace = true
 tempfile = "3"

@@ -191,12 +191,12 @@ pub async fn create_index(
     let ns = NamespaceId::new(namespace)?;
 
     if req.kind != "ivf_pq" {
-        return Err(ApiError(firnflow_core::FirnflowError::InvalidRequest(
-            format!(
+        return Err(ApiError::Core(
+            firnflow_core::FirnflowError::InvalidRequest(format!(
                 "unsupported index kind {:?}, only \"ivf_pq\" is supported",
                 req.kind
-            ),
-        )));
+            )),
+        ));
     }
 
     let service = Arc::clone(&state.service);
@@ -369,7 +369,7 @@ pub async fn list(
     // gated behind scalar-index support, which is a separate issue.
     if let Some(col) = params.order_by.as_deref() {
         if col != LIST_ORDER_BY {
-            return Err(ApiError(FirnflowError::InvalidRequest(format!(
+            return Err(ApiError::Core(FirnflowError::InvalidRequest(format!(
                 "order_by must be {LIST_ORDER_BY:?} in v1, got {col:?}"
             ))));
         }
@@ -379,7 +379,7 @@ pub async fn list(
         "desc" => ListOrder::Desc,
         "asc" => ListOrder::Asc,
         other => {
-            return Err(ApiError(FirnflowError::InvalidRequest(format!(
+            return Err(ApiError::Core(FirnflowError::InvalidRequest(format!(
                 "order must be \"asc\" or \"desc\", got {other:?}"
             ))));
         }
@@ -387,12 +387,12 @@ pub async fn list(
 
     let limit = params.limit.unwrap_or(DEFAULT_LIST_LIMIT);
     if limit == 0 {
-        return Err(ApiError(FirnflowError::InvalidRequest(
+        return Err(ApiError::Core(FirnflowError::InvalidRequest(
             "limit must be >= 1".into(),
         )));
     }
     if limit > LIST_MAX_LIMIT {
-        return Err(ApiError(FirnflowError::InvalidRequest(format!(
+        return Err(ApiError::Core(FirnflowError::InvalidRequest(format!(
             "limit {limit} exceeds maximum {LIST_MAX_LIMIT}"
         ))));
     }
