@@ -22,9 +22,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
+use lancedb::table::OptimizeAction;
 
 const WRITERS: usize = 8;
 const ROWS_PER_WRITER: usize = 100;
@@ -455,6 +457,294 @@ async fn concurrent_writers_100_runs_gcs() {
         run_stress(uri_base.clone(), opts.clone()).await;
         if run % 10 == 0 {
             eprintln!("gcs run {run}/{RUNS} passed");
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Writer-during-compaction race (OSWALD-flavour).
+//
+// OSWALD (https://nvartolomei.com/oswald) proves that PUT-If-None-Match
+// alone is insufficient when garbage collection (compaction) is active:
+// a write may succeed from the writer's perspective and yet be absent
+// from the post-compaction state. SlateDB hit this exact bug in May
+// 2026; whether Lance's commit protocol handles it cleanly on top of
+// S3 is the question this test answers.
+//
+// Shape: identical to `run_stress` (8 writers × 100 rows on a fresh
+// namespace) plus a single compactor task that loops `OptimizeAction`
+// while the writers race to append. After all writers finish, the
+// compactor is signalled to stop and the row count is verified. A
+// row count below 800 is the OSWALD-flavour failure mode — silent
+// loss, the dangerous shape. A panic from the compactor or a writer
+// would be a different (safer) outcome and is allowed to propagate.
+// -----------------------------------------------------------------------------
+
+async fn run_stress_with_compaction(uri_base: String, opts: HashMap<String, String>) {
+    let ns = unique_namespace("oswald");
+    let uri = format!("{uri_base}/{ns}");
+    let schema = schema();
+
+    // Seed the table with an empty batch so the schema is registered
+    // and the first compaction has something to operate on.
+    let initial = empty_batch(schema.clone());
+    let reader: Box<dyn RecordBatchReader + Send> =
+        Box::new(RecordBatchIterator::new(vec![Ok(initial)], schema.clone()));
+    let conn = connect(&uri, &opts).await;
+    conn.create_table(TABLE, reader)
+        .execute()
+        .await
+        .expect("create_table");
+
+    // Compactor task: loops OptimizeAction::default() (== Compact) until
+    // signalled to stop. Errors are swallowed because a commit-conflict
+    // bubbling up to the operator is *safe* behaviour — it's only silent
+    // row loss in the final count that proves the OSWALD bug.
+    let stop = Arc::new(AtomicBool::new(false));
+    let compactor = {
+        let uri = uri.clone();
+        let opts = opts.clone();
+        let stop = Arc::clone(&stop);
+        tokio::spawn(async move {
+            let mut iterations = 0usize;
+            let mut errors = 0usize;
+            while !stop.load(Ordering::Relaxed) {
+                let conn = connect(&uri, &opts).await;
+                let tbl = match conn.open_table(TABLE).execute().await {
+                    Ok(t) => t,
+                    Err(_) => {
+                        errors += 1;
+                        continue;
+                    }
+                };
+                match tbl.optimize(OptimizeAction::default()).await {
+                    Ok(_) => iterations += 1,
+                    Err(_) => errors += 1,
+                }
+            }
+            (iterations, errors)
+        })
+    };
+
+    // Spawn N writers, identical to run_stress. Each re-opens the
+    // connection so the CAS contention is real, not faked through
+    // shared in-process state.
+    let mut handles = Vec::with_capacity(WRITERS);
+    for writer_id in 0..WRITERS {
+        let uri = uri.clone();
+        let opts = opts.clone();
+        let schema = schema.clone();
+        handles.push(tokio::spawn(async move {
+            let conn = connect(&uri, &opts).await;
+            let tbl = conn.open_table(TABLE).execute().await.expect("open_table");
+            let batch = writer_batch(schema.clone(), writer_id as u32, ROWS_PER_WRITER);
+            let reader: Box<dyn RecordBatchReader + Send> =
+                Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema));
+            tbl.add(reader).execute().await.expect("table.add");
+        }));
+    }
+    for h in handles {
+        h.await.expect("writer task panicked");
+    }
+
+    // Signal the compactor and wait for it to finish its in-flight
+    // iteration. We capture the (iterations, errors) tuple so the
+    // test output makes it obvious whether the compactor actually
+    // ran during the writer window.
+    stop.store(true, Ordering::Relaxed);
+    let (iterations, errors) = compactor.await.expect("compactor task panicked");
+    eprintln!(
+        "compactor finished: {iterations} successful optimize calls, {errors} errors"
+    );
+
+    let conn = connect(&uri, &opts).await;
+    let tbl = conn.open_table(TABLE).execute().await.expect("open_table");
+    let count = tbl.count_rows(None).await.expect("count_rows");
+    let expected = WRITERS * ROWS_PER_WRITER;
+    assert_eq!(
+        count, expected,
+        "writer-during-compaction stress on {uri}: expected {expected} rows, got {count}. \
+         Lance's commit protocol lost writes when compaction ran concurrently — this is \
+         the OSWALD-flavour writer/GC race (compactor ran {iterations} times, {errors} errors)."
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writes_during_compaction_minio() {
+    let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
+    let uri_base = format!("s3://{bucket}");
+    run_stress_with_compaction(uri_base, minio_storage_options()).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writes_during_compaction_aws() {
+    if std::env::var("AWS_PROFILE").is_err() {
+        eprintln!("SKIP: AWS_PROFILE not set; real-AWS OSWALD race test needs a configured CLI profile");
+        return;
+    }
+    let bucket = env_or("FIRNFLOW_AWS_BUCKET", "firnflow-cloudfloe");
+    let uri_base = format!("s3://{bucket}");
+    run_stress_with_compaction(uri_base, aws_storage_options()).await;
+}
+
+/// 50-iteration regression guard. Run once a clean / failing single-shot
+/// result has been established; deterministic loss (every iteration
+/// failing identically) is conclusive after even one run, but a flaky
+/// race may only surface intermittently. Mirrors the existing 100-run
+/// stress tests.
+#[tokio::test]
+#[ignore]
+async fn concurrent_writes_during_compaction_50_runs_minio() {
+    const RUNS: usize = 50;
+    let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
+    let uri_base = format!("s3://{bucket}");
+    let opts = minio_storage_options();
+    for run in 1..=RUNS {
+        run_stress_with_compaction(uri_base.clone(), opts.clone()).await;
+        eprintln!("oswald minio run {run}/{RUNS} passed");
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Aggressive writer-during-compaction variant.
+//
+// The standard variant (8 writers × 1 batch × 100 rows) gives the
+// compactor only 8 writer-side manifest commits to race against. That
+// passed 50/50 on MinIO, but a short writer window is the easiest case
+// to handle correctly — the OSWALD bug is most likely to surface when
+// many writers each commit several times in a row, multiplying the
+// chance that a compactor lands its manifest rewrite between a writer
+// reading the current manifest and writing back its CAS.
+//
+// This variant runs 16 writers × 4 sequential appends × 25 rows = 1600
+// total rows, with the same single compactor looping `OptimizeAction::All`.
+// 64 writer commits per iteration vs. 8 in the standard test.
+// -----------------------------------------------------------------------------
+
+const AGG_WRITERS: usize = 16;
+const AGG_BATCHES_PER_WRITER: usize = 4;
+const AGG_ROWS_PER_BATCH: usize = 25;
+
+async fn run_stress_with_compaction_aggressive(
+    uri_base: String,
+    opts: HashMap<String, String>,
+) {
+    let ns = unique_namespace("oswald-agg");
+    let uri = format!("{uri_base}/{ns}");
+    let schema = schema();
+
+    let initial = empty_batch(schema.clone());
+    let reader: Box<dyn RecordBatchReader + Send> =
+        Box::new(RecordBatchIterator::new(vec![Ok(initial)], schema.clone()));
+    let conn = connect(&uri, &opts).await;
+    conn.create_table(TABLE, reader)
+        .execute()
+        .await
+        .expect("create_table");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let compactor = {
+        let uri = uri.clone();
+        let opts = opts.clone();
+        let stop = Arc::clone(&stop);
+        tokio::spawn(async move {
+            let mut iterations = 0usize;
+            let mut errors = 0usize;
+            while !stop.load(Ordering::Relaxed) {
+                let conn = connect(&uri, &opts).await;
+                let tbl = match conn.open_table(TABLE).execute().await {
+                    Ok(t) => t,
+                    Err(_) => {
+                        errors += 1;
+                        continue;
+                    }
+                };
+                match tbl.optimize(OptimizeAction::default()).await {
+                    Ok(_) => iterations += 1,
+                    Err(_) => errors += 1,
+                }
+            }
+            (iterations, errors)
+        })
+    };
+
+    let mut handles = Vec::with_capacity(AGG_WRITERS);
+    for writer_id in 0..AGG_WRITERS {
+        let uri = uri.clone();
+        let opts = opts.clone();
+        let schema = schema.clone();
+        handles.push(tokio::spawn(async move {
+            let conn = connect(&uri, &opts).await;
+            let tbl = conn.open_table(TABLE).execute().await.expect("open_table");
+            for batch_idx in 0..AGG_BATCHES_PER_WRITER {
+                // Distinct id range per (writer, batch) so the row
+                // count is the only signal that matters and ids stay
+                // human-readable when introspecting after a failure.
+                let pseudo_writer =
+                    (writer_id * AGG_BATCHES_PER_WRITER + batch_idx) as u32;
+                let batch = writer_batch(schema.clone(), pseudo_writer, AGG_ROWS_PER_BATCH);
+                let reader: Box<dyn RecordBatchReader + Send> = Box::new(
+                    RecordBatchIterator::new(vec![Ok(batch)], schema.clone()),
+                );
+                tbl.add(reader).execute().await.expect("table.add");
+            }
+        }));
+    }
+    for h in handles {
+        h.await.expect("writer task panicked");
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    let (iterations, errors) = compactor.await.expect("compactor task panicked");
+    eprintln!(
+        "compactor finished (aggressive): {iterations} optimize calls, {errors} errors"
+    );
+
+    let conn = connect(&uri, &opts).await;
+    let tbl = conn.open_table(TABLE).execute().await.expect("open_table");
+    let count = tbl.count_rows(None).await.expect("count_rows");
+    let expected = AGG_WRITERS * AGG_BATCHES_PER_WRITER * AGG_ROWS_PER_BATCH;
+    assert_eq!(
+        count, expected,
+        "aggressive writer-during-compaction stress on {uri}: expected {expected} rows, got {count}. \
+         Lance's commit protocol lost writes when compaction ran concurrently — this is \
+         the OSWALD-flavour writer/GC race (compactor ran {iterations} times, {errors} errors)."
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writes_during_compaction_aggressive_minio() {
+    let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
+    let uri_base = format!("s3://{bucket}");
+    run_stress_with_compaction_aggressive(uri_base, minio_storage_options()).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writes_during_compaction_aggressive_aws() {
+    if std::env::var("AWS_PROFILE").is_err() {
+        eprintln!("SKIP: AWS_PROFILE not set; AWS aggressive OSWALD race needs a configured CLI profile");
+        return;
+    }
+    let bucket = env_or("FIRNFLOW_AWS_BUCKET", "firnflow-cloudfloe");
+    let uri_base = format!("s3://{bucket}");
+    run_stress_with_compaction_aggressive(uri_base, aws_storage_options()).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writes_during_compaction_aggressive_200_runs_minio() {
+    const RUNS: usize = 200;
+    let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
+    let uri_base = format!("s3://{bucket}");
+    let opts = minio_storage_options();
+    for run in 1..=RUNS {
+        run_stress_with_compaction_aggressive(uri_base.clone(), opts.clone()).await;
+        if run % 10 == 0 {
+            eprintln!("oswald-agg minio run {run}/{RUNS} passed");
         }
     }
 }
