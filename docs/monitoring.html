@@ -58,6 +58,14 @@ scrape_configs:
       - targets: ['firn:3000']</code></pre>
     <p>The endpoint returns metrics in Prometheus text exposition format (<code>text/plain; version=0.0.4</code>).</p>
 
+    <p>If <code>FIRNFLOW_METRICS_TOKEN</code> is configured, <code>/metrics</code> requires <code>Authorization: Bearer &lt;token&gt;</code>. Same Bearer parser as the data plane, so Prometheus's <code>bearer_token_file</code> scrape config works directly:</p>
+    <pre><code>scrape_configs:
+  - job_name: firn
+    bearer_token_file: /etc/prometheus/firn-metrics-token
+    static_configs:
+      - targets: ['firn:3000']</code></pre>
+    <p>Leaving the token unset (the default) keeps <code>/metrics</code> open, which matches the typical "scrape from a private subnet" pattern.</p>
+
     <h2>Metric reference</h2>
 
     <h3>Cache metrics</h3>
@@ -139,6 +147,28 @@ scrape_configs:
       <div class="callout-title">The key metric</div>
       <code>firnflow_s3_requests_total</code> is the metric that proves the cache is working. Compare <code>s3_requests_total{operation="query"}</code> against <code>cache_misses_total</code>; they should be equal. The difference between total queries and cache misses is how many S3 requests the cache has eliminated.
     </div>
+
+    <h3>Auth and rate-limit metrics</h3>
+    <table>
+      <thead><tr><th>Metric</th><th>Type</th><th>Labels</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>firnflow_auth_rejections_total</code></td>
+          <td>Counter</td>
+          <td><code>reason</code></td>
+          <td>
+            Requests rejected before reaching their handler. <code>reason</code> is one of:
+            <ul>
+              <li><code>missing</code> — no <code>Authorization</code> header on a protected route.</li>
+              <li><code>invalid</code> — header present but token does not match a configured key.</li>
+              <li><code>forbidden</code> — valid token but insufficient scope (write key on an admin route while a separate admin key is configured).</li>
+              <li><code>rate_limited</code> — shed by the per-principal or pre-auth IP limiter.</li>
+            </ul>
+            Use this counter to detect misconfigured keys after a rotation (sudden spike in <code>missing</code>) or credential-stuffing pressure (sustained spike in <code>invalid</code> or <code>rate_limited</code>).
+          </td>
+        </tr>
+      </tbody>
+    </table>
 
     <h2>PromQL examples</h2>
 

@@ -168,6 +168,29 @@ FIRNFLOW_S3_SECRET_KEY=minioadmin \
   ]
 }</code></pre>
 
+    <h2>Authentication and rate limiting</h2>
+    <p>The API ships with optional bearer-token authentication. <strong>Production deployments should always set <code>FIRNFLOW_API_KEY</code></strong> — running without it triggers a startup <code>WARN</code> log line and is unsupported. See <a href="configuration.html#authentication">configuration</a> for the full env-var list.</p>
+    <ul>
+      <li><code>FIRNFLOW_API_KEY</code> — read/write tier. Required.</li>
+      <li><code>FIRNFLOW_ADMIN_API_KEY</code> — separate destructive-ops key. Optional but recommended; set to a different value to lock <code>delete</code> / <code>compact</code> / index builds behind a credential the application clients do not hold.</li>
+      <li><code>FIRNFLOW_METRICS_TOKEN</code> — optional gate on <code>/metrics</code>. Use the same Bearer header.</li>
+      <li><code>FIRNFLOW_RATE_LIMIT_RPS</code> + <code>FIRNFLOW_RATE_LIMIT_BURST</code> — per-principal token-bucket limiter. Set once a normal traffic baseline is visible in <code>/metrics</code>.</li>
+      <li><code>FIRNFLOW_TRUST_PROXY_HEADERS=true</code> — only when Firn sits behind a load balancer or reverse proxy that strips client-supplied <code>X-Forwarded-For</code> at the edge.</li>
+    </ul>
+
+    <p>Recommended rollout: deploy 0.5.0 with no keys (verify the WARN appears), set <code>FIRNFLOW_API_KEY</code>, roll clients to send <code>Authorization: Bearer …</code>, then set <code>FIRNFLOW_ADMIN_API_KEY</code> to a distinct value, and finally tune the rate-limit knobs. Rollback is to unset the variables and restart — no on-disk schema or cache format change.</p>
+
+    <pre><code># curl with bearer header
+curl -X POST https://firn.example.com/ns/production/upsert \
+  -H "Authorization: Bearer $FIRNFLOW_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"rows": [...]}'</code></pre>
+
+    <div class="callout callout-warning">
+      <div class="callout-title">Service-level only</div>
+      A token authorises operations against the firnflow process, not against a specific namespace. Per-tenant namespace isolation requires an authenticating gateway in front of Firn that maps tenants to namespaces.
+    </div>
+
     <h2>Health checks</h2>
     <p>Use <code>GET /health</code> for both liveness and readiness probes. The endpoint returns <code>200</code> with body <code>ok</code> as soon as the server is listening.</p>
 

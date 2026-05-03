@@ -62,6 +62,9 @@
     <p>
       The result: your data lives cheaply on S3, but hot queries feel local. The <code>/metrics</code> endpoint shows exactly how many S3 requests the cache is saving you.
     </p>
+    <p>
+      Production hardening, new in 0.5.0: optional bearer-token authentication with a read/write and admin scope split, optional <code>tower-governor</code> rate limiting keyed on the validated principal, and an opt-in <code>/metrics</code> token. See <a href="configuration.html#authentication">configuration</a> and <a href="deployment.html#authentication-and-rate-limiting">deployment</a>.
+    </p>
 
     <h2>Documentation</h2>
 

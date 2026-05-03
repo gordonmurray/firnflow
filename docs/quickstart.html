@@ -53,6 +53,11 @@
       <li><a href="https://docs.docker.com/get-docker/">Docker</a> and Docker Compose V2</li>
     </ul>
 
+    <div class="callout callout-info">
+      <div class="callout-title">Default-open local stack</div>
+      This quickstart talks to a default-open local stack — no <code>Authorization</code> header is required. Before exposing Firn on a network you do not trust, set <code>FIRNFLOW_API_KEY</code> and send <code>Authorization: Bearer &lt;token&gt;</code> with every request. See <a href="deployment.html#authentication-and-rate-limiting">deployment</a> and <a href="configuration.html#authentication">configuration</a> for the full story.
+    </div>
+
     <h2>1. Clone and start the stack</h2>
     <p>This launches MinIO (local S3) and the Firn API server together.</p>
     <pre><code>git clone https://github.com/gordonmurray/firnflow
