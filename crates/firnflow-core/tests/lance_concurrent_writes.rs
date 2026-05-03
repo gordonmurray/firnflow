@@ -21,8 +21,8 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
@@ -553,9 +553,7 @@ async fn run_stress_with_compaction(uri_base: String, opts: HashMap<String, Stri
     // ran during the writer window.
     stop.store(true, Ordering::Relaxed);
     let (iterations, errors) = compactor.await.expect("compactor task panicked");
-    eprintln!(
-        "compactor finished: {iterations} successful optimize calls, {errors} errors"
-    );
+    eprintln!("compactor finished: {iterations} successful optimize calls, {errors} errors");
 
     let conn = connect(&uri, &opts).await;
     let tbl = conn.open_table(TABLE).execute().await.expect("open_table");
@@ -581,7 +579,9 @@ async fn concurrent_writes_during_compaction_minio() {
 #[ignore]
 async fn concurrent_writes_during_compaction_aws() {
     if std::env::var("AWS_PROFILE").is_err() {
-        eprintln!("SKIP: AWS_PROFILE not set; real-AWS OSWALD race test needs a configured CLI profile");
+        eprintln!(
+            "SKIP: AWS_PROFILE not set; real-AWS OSWALD race test needs a configured CLI profile"
+        );
         return;
     }
     let bucket = env_or("FIRNFLOW_AWS_BUCKET", "firnflow-cloudfloe");
@@ -627,10 +627,7 @@ const AGG_WRITERS: usize = 16;
 const AGG_BATCHES_PER_WRITER: usize = 4;
 const AGG_ROWS_PER_BATCH: usize = 25;
 
-async fn run_stress_with_compaction_aggressive(
-    uri_base: String,
-    opts: HashMap<String, String>,
-) {
+async fn run_stress_with_compaction_aggressive(uri_base: String, opts: HashMap<String, String>) {
     let ns = unique_namespace("oswald-agg");
     let uri = format!("{uri_base}/{ns}");
     let schema = schema();
@@ -682,12 +679,10 @@ async fn run_stress_with_compaction_aggressive(
                 // Distinct id range per (writer, batch) so the row
                 // count is the only signal that matters and ids stay
                 // human-readable when introspecting after a failure.
-                let pseudo_writer =
-                    (writer_id * AGG_BATCHES_PER_WRITER + batch_idx) as u32;
+                let pseudo_writer = (writer_id * AGG_BATCHES_PER_WRITER + batch_idx) as u32;
                 let batch = writer_batch(schema.clone(), pseudo_writer, AGG_ROWS_PER_BATCH);
-                let reader: Box<dyn RecordBatchReader + Send> = Box::new(
-                    RecordBatchIterator::new(vec![Ok(batch)], schema.clone()),
-                );
+                let reader: Box<dyn RecordBatchReader + Send> =
+                    Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema.clone()));
                 tbl.add(reader).execute().await.expect("table.add");
             }
         }));
@@ -698,9 +693,7 @@ async fn run_stress_with_compaction_aggressive(
 
     stop.store(true, Ordering::Relaxed);
     let (iterations, errors) = compactor.await.expect("compactor task panicked");
-    eprintln!(
-        "compactor finished (aggressive): {iterations} optimize calls, {errors} errors"
-    );
+    eprintln!("compactor finished (aggressive): {iterations} optimize calls, {errors} errors");
 
     let conn = connect(&uri, &opts).await;
     let tbl = conn.open_table(TABLE).execute().await.expect("open_table");
@@ -726,7 +719,9 @@ async fn concurrent_writes_during_compaction_aggressive_minio() {
 #[ignore]
 async fn concurrent_writes_during_compaction_aggressive_aws() {
     if std::env::var("AWS_PROFILE").is_err() {
-        eprintln!("SKIP: AWS_PROFILE not set; AWS aggressive OSWALD race needs a configured CLI profile");
+        eprintln!(
+            "SKIP: AWS_PROFILE not set; AWS aggressive OSWALD race needs a configured CLI profile"
+        );
         return;
     }
     let bucket = env_or("FIRNFLOW_AWS_BUCKET", "firnflow-cloudfloe");
