@@ -15,81 +15,23 @@
 //! ./scripts/cargo test -p firnflow-api --test api_compact -- --ignored --nocapture
 //! ```
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use firnflow_api::{router, AppState};
-use firnflow_core::cache::NamespaceCache;
-use firnflow_core::metrics::test_metrics;
-use firnflow_core::{CoreMetrics, NamespaceManager, NamespaceService};
+use firnflow_api::router;
+use firnflow_core::CoreMetrics;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-fn unique_namespace(prefix: &str) -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    format!("{prefix}-{nanos}")
-}
-
-fn minio_options() -> HashMap<String, String> {
-    HashMap::from([
-        (
-            "aws_access_key_id".into(),
-            env_or("FIRNFLOW_S3_ACCESS_KEY", "minioadmin"),
-        ),
-        (
-            "aws_secret_access_key".into(),
-            env_or("FIRNFLOW_S3_SECRET_KEY", "minioadmin"),
-        ),
-        (
-            "aws_endpoint".into(),
-            env_or("FIRNFLOW_S3_ENDPOINT", "http://127.0.0.1:9000"),
-        ),
-        ("aws_region".into(), "us-east-1".into()),
-        ("allow_http".into(), "true".into()),
-        ("aws_virtual_hosted_style_request".into(), "false".into()),
-    ])
-}
+mod common;
+use common::{test_state, unique_namespace};
 
 async fn build_app_with_metrics() -> (axum::Router, tempfile::TempDir, Arc<CoreMetrics>) {
-    let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
-    let tmp = tempfile::tempdir().unwrap();
-    let metrics = test_metrics();
-    let manager = Arc::new(NamespaceManager::new(
-        bucket,
-        minio_options(),
-        Arc::clone(&metrics),
-    ));
-    let cache = Arc::new(
-        NamespaceCache::new(
-            16 * 1024 * 1024,
-            tmp.path(),
-            64 * 1024 * 1024,
-            Arc::clone(&metrics),
-        )
-        .await
-        .unwrap(),
-    );
-    let service = Arc::new(NamespaceService::new(
-        Arc::clone(&manager),
-        cache,
-        Arc::clone(&metrics),
-    ));
-    let app = router(AppState {
-        service,
-        manager,
-        metrics: Arc::clone(&metrics),
-    });
-    (app, tmp, metrics)
+    let (state, tmp) = test_state().await;
+    let metrics = Arc::clone(&state.metrics);
+    (router(state), tmp, metrics)
 }
 
 async fn post_json(app: axum::Router, uri: String, body: Value) -> (StatusCode, Value) {

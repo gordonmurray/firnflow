@@ -11,6 +11,7 @@
 //! * `firnflow_active_namespaces`
 //! * `firnflow_s3_requests_total{namespace, operation}`
 //! * `firnflow_cached_handles`
+//! * `firnflow_auth_rejections_total{reason}`
 //!
 //! Constructed once at process start (in
 //! `firnflow-api::state::build_state`), wrapped in `Arc`, and
@@ -50,6 +51,7 @@ pub struct CoreMetrics {
     index_build_duration: HistogramVec,
     compaction_duration: HistogramVec,
     cached_handles: IntGauge,
+    auth_rejections: IntCounterVec,
     seen_namespaces: DashSet<NamespaceId>,
 }
 
@@ -181,6 +183,27 @@ impl CoreMetrics {
             .register(Box::new(cached_handles.clone()))
             .map_err(metrics_err)?;
 
+        let auth_rejections = IntCounterVec::new(
+            Opts::new(
+                "firnflow_auth_rejections_total",
+                "Requests rejected before reaching their handler. \
+                 The `reason` label is one of: `missing` (no \
+                 Authorization header), `invalid` (header present \
+                 but token does not match a configured key), \
+                 `forbidden` (valid token, insufficient scope for \
+                 the route), `rate_limited` (rejected by either \
+                 rate limiter). Use this to detect misconfigured \
+                 keys after a rotation (spike in `missing`) or \
+                 credential-stuffing pressure (spike in `invalid` \
+                 or `rate_limited`).",
+            ),
+            &["reason"],
+        )
+        .map_err(metrics_err)?;
+        registry
+            .register(Box::new(auth_rejections.clone()))
+            .map_err(metrics_err)?;
+
         Ok(Self {
             registry,
             cache_hits,
@@ -192,6 +215,7 @@ impl CoreMetrics {
             index_build_duration,
             compaction_duration,
             cached_handles,
+            auth_rejections,
             seen_namespaces: DashSet::new(),
         })
     }
@@ -289,6 +313,20 @@ impl CoreMetrics {
     /// by tests; production code should read it via `/metrics`.
     pub fn cached_handles_value(&self) -> i64 {
         self.cached_handles.get()
+    }
+
+    /// Record an auth/rate-limit rejection. `reason` must be one of
+    /// the documented values: `"missing"`, `"invalid"`, `"forbidden"`,
+    /// `"rate_limited"`. Other values are accepted but cardinality is
+    /// the operator's responsibility.
+    pub fn record_auth_rejection(&self, reason: &str) {
+        self.auth_rejections.with_label_values(&[reason]).inc();
+    }
+
+    /// Current value of `firnflow_auth_rejections_total{reason=…}`.
+    /// Test-only accessor; production code reads `/metrics`.
+    pub fn auth_rejections_value(&self, reason: &str) -> u64 {
+        self.auth_rejections.with_label_values(&[reason]).get()
     }
 }
 

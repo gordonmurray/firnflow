@@ -43,6 +43,20 @@ axum = "0.8"
 # spinning up a real TCP listener.
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace"] }
+# Token-bucket rate limiting on the protected sub-router. Keys on
+# either a validated `Principal` extension (post-auth) or peer IP
+# (pre-auth coarse limiter). 0.7 is the latest line that works
+# against axum 0.8 + tower 0.5; later majors track newer axum.
+tower_governor = "0.7"
+# tower_governor's underlying limiter. Named explicitly so we can
+# spell `NoOpMiddleware` in a type alias — tower_governor does not
+# re-export it.
+governor = "0.8"
+
+# Constant-time secret comparison. Already pulled in transitively
+# elsewhere; named explicitly so the auth code doesn't depend on
+# someone else's transitive choice.
+subtle = "2"
 
 # Serialisation.
 serde = { version = "1", features = ["derive"] }

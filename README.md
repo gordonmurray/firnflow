@@ -100,21 +100,47 @@ See how much S3 traffic you've avoided:
 curl http://localhost:3000/metrics | grep s3_requests
 ```
 
+## Authentication
+
+Firn ships with optional bearer-token authentication on the REST API. Both keys are opt-in:
+
+| Env var | Tier | Routes |
+| :--- | :--- | :--- |
+| `FIRNFLOW_API_KEY` | read/write | `upsert`, `query`, `list`, `warmup` |
+| `FIRNFLOW_ADMIN_API_KEY` | admin (destructive) | `delete`, `index`, `fts-index`, `scalar-index`, `compact` |
+| `FIRNFLOW_METRICS_TOKEN` | metrics | `/metrics` (otherwise public) |
+
+Header format on every protected request: `Authorization: Bearer <token>`.
+
+If `FIRNFLOW_ADMIN_API_KEY` is unset, the read/write key authorises admin routes too (single-key fallback). Set both keys to a different value to lock destructive operations behind a separate credential. If neither key is set the API stays open and logs a single startup `WARN` — this preserves the default-open posture of the local-dev compose stack.
+
+```bash
+export FIRNFLOW_API_KEY=$(openssl rand -hex 32)
+curl -X POST http://localhost:3000/ns/demo/upsert \
+     -H "Authorization: Bearer $FIRNFLOW_API_KEY" \
+     -H 'Content-Type: application/json' \
+     -d '{"rows": [...]}'
+```
+
+**This is service-level authentication.** Any holder of `FIRNFLOW_API_KEY` can read or write any namespace; any holder of `FIRNFLOW_ADMIN_API_KEY` can additionally delete or rebuild indexes on any namespace. If you need per-tenant namespace isolation, place Firn behind an authenticating gateway that enforces tenant-to-namespace authorisation. See [`docs/configuration.html`](https://firnflow.io/configuration.html) for the rate-limiting knobs (`FIRNFLOW_RATE_LIMIT_RPS`, `FIRNFLOW_RATE_LIMIT_BURST`, `FIRNFLOW_PREAUTH_IP_LIMIT_RPS`) and the `FIRNFLOW_TRUST_PROXY_HEADERS` switch for deployments behind a load balancer.
+
 ## API Surface
 
-| Endpoint | Method | Description |
-| :--- | :--- | :--- |
-| `/health` | `GET` | Liveness check |
-| `/metrics` | `GET` | Prometheus exposition format |
-| `/ns/{ns}` | `DELETE` | Removes all data (S3 + Cache) for a namespace |
-| `/ns/{ns}/upsert` | `POST` | Insert/update vectors and data |
-| `/ns/{ns}/query` | `POST` | Vector, FTS, or hybrid search |
-| `/ns/{ns}/list` | `GET` | Cursor-paginated list ordered by `_ingested_at` |
-| `/ns/{ns}/warmup` | `POST` | Non-blocking cache pre-warm hint |
-| `/ns/{ns}/index` | `POST` | Build IVF_PQ vector index (async, returns 202) |
-| `/ns/{ns}/fts-index` | `POST` | Build BM25 full-text search index (async, returns 202) |
-| `/ns/{ns}/scalar-index` | `POST` | Build BTree index on `_ingested_at` to accelerate `/list` (async, returns 202) |
-| `/ns/{ns}/compact` | `POST` | Compact and prune data files (async, returns 202) |
+| Endpoint | Method | Auth | Description |
+| :--- | :--- | :--- | :--- |
+| `/health` | `GET` | open | Liveness check |
+| `/metrics` | `GET` | metrics or open | Prometheus exposition format |
+| `/ns/{ns}` | `DELETE` | admin | Removes all data (S3 + Cache) for a namespace |
+| `/ns/{ns}/upsert` | `POST` | read/write | Insert/update vectors and data |
+| `/ns/{ns}/query` | `POST` | read/write | Vector, FTS, or hybrid search |
+| `/ns/{ns}/list` | `GET` | read/write | Cursor-paginated list ordered by `_ingested_at` |
+| `/ns/{ns}/warmup` | `POST` | read/write | Non-blocking cache pre-warm hint |
+| `/ns/{ns}/index` | `POST` | admin | Build IVF_PQ vector index (async, returns 202) |
+| `/ns/{ns}/fts-index` | `POST` | admin | Build BM25 full-text search index (async, returns 202) |
+| `/ns/{ns}/scalar-index` | `POST` | admin | Build BTree index on `_ingested_at` to accelerate `/list` (async, returns 202) |
+| `/ns/{ns}/compact` | `POST` | admin | Compact and prune data files (async, returns 202) |
+
+Auth column: `open` = no header required; `read/write` = `FIRNFLOW_API_KEY` (or `FIRNFLOW_ADMIN_API_KEY`); `admin` = `FIRNFLOW_ADMIN_API_KEY` if configured, otherwise `FIRNFLOW_API_KEY` via the single-key fallback. `/metrics` is `metrics` when `FIRNFLOW_METRICS_TOKEN` is set, otherwise `open`.
 
 ## Development and Benchmarking
 

@@ -48,6 +48,24 @@
     <h1>API Reference</h1>
     <p class="subtitle">All request and response bodies are JSON. The base URL defaults to <code>http://localhost:3000</code>.</p>
 
+    <h2>Authentication</h2>
+    <p>When <code>FIRNFLOW_API_KEY</code> is configured, every protected endpoint requires <code>Authorization: Bearer &lt;token&gt;</code>. Two tiers exist:</p>
+    <ul>
+      <li><strong>Read/write</strong> (<code>FIRNFLOW_API_KEY</code>) — <code>upsert</code>, <code>query</code>, <code>list</code>, <code>warmup</code>.</li>
+      <li><strong>Admin</strong> (<code>FIRNFLOW_ADMIN_API_KEY</code>) — <code>delete</code>, <code>index</code>, <code>fts-index</code>, <code>scalar-index</code>, <code>compact</code>. The admin key also satisfies read/write routes. If no admin key is configured, the read/write key authorises admin routes too (single-key fallback).</li>
+    </ul>
+    <p><code>/health</code> is always public. <code>/metrics</code> is public unless <code>FIRNFLOW_METRICS_TOKEN</code> is set, in which case the same Bearer header is required. Token comparisons are constant-time (<code>subtle::ConstantTimeEq</code>). See <a href="configuration.html#authentication">configuration</a> for the full env-var list, including the optional <code>FIRNFLOW_RATE_LIMIT_RPS</code> / <code>FIRNFLOW_PREAUTH_IP_LIMIT_RPS</code> rate-limit knobs.</p>
+    <p>Rejection responses on protected endpoints:</p>
+    <ul>
+      <li><code>401 Unauthorized</code> — header missing, malformed, or token unknown. Includes <code>WWW-Authenticate: Bearer realm="firnflow"</code>.</li>
+      <li><code>403 Forbidden</code> — valid token but the route requires admin scope and only the read/write key was presented.</li>
+      <li><code>429 Too Many Requests</code> — rejected by either rate limiter; includes <code>Retry-After</code> seconds.</li>
+    </ul>
+    <div class="callout callout-warning">
+      <div class="callout-title">Service-level only</div>
+      A token authorises operations against the firnflow process, not against a specific namespace. Per-tenant namespace isolation requires an authenticating gateway in front of Firn.
+    </div>
+
     <h2>Namespaces</h2>
     <p>Every data operation is scoped to a namespace. Namespace names must be lowercase alphanumeric with hyphens, and no longer than 64 characters. Each namespace maps to an isolated S3 prefix <code>s3://bucket/namespace/</code>.</p>
     <p>Valid: <code>my-project</code>, <code>embeddings-v2</code>, <code>prod-search</code>.<br>
@@ -447,6 +465,21 @@
           <td><code>400</code></td>
           <td>Invalid namespace name, dimension mismatch, empty query, unsupported index kind</td>
           <td><code>{"error": "invalid namespace: must be lowercase alphanumeric and hyphens, max 64 chars"}</code></td>
+        </tr>
+        <tr>
+          <td><code>401</code></td>
+          <td>Missing, malformed, or unknown <code>Authorization: Bearer</code> header. Only emitted when an API key is configured. Includes <code>WWW-Authenticate</code>.</td>
+          <td><code>{"error": "unauthorized"}</code></td>
+        </tr>
+        <tr>
+          <td><code>403</code></td>
+          <td>Valid read/write key on an admin route while a separate admin key is configured.</td>
+          <td><code>{"error": "forbidden"}</code></td>
+        </tr>
+        <tr>
+          <td><code>429</code></td>
+          <td>Rejected by the per-principal or pre-auth IP rate limiter. Response includes <code>Retry-After</code> in seconds.</td>
+          <td><code>{"error": "rate limited"}</code></td>
         </tr>
         <tr>
           <td><code>500</code></td>
