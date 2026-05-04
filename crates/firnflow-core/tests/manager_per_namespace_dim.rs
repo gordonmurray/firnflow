@@ -64,9 +64,9 @@ async fn three_namespaces_with_different_dims() {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
     let manager = NamespaceManager::new(bucket, minio_options(), test_metrics());
 
-    let ns4 = NamespaceId::new(unique_namespace("slice6a-dim4")).unwrap();
-    let ns8 = NamespaceId::new(unique_namespace("slice6a-dim8")).unwrap();
-    let ns16 = NamespaceId::new(unique_namespace("slice6a-dim16")).unwrap();
+    let ns4 = NamespaceId::new(unique_namespace("multi-dim-4")).unwrap();
+    let ns8 = NamespaceId::new(unique_namespace("multi-dim-8")).unwrap();
+    let ns16 = NamespaceId::new(unique_namespace("multi-dim-16")).unwrap();
 
     // ---- upsert into each namespace with its own dimension ----
     manager
@@ -173,7 +173,7 @@ async fn three_namespaces_with_different_dims() {
 async fn first_upsert_infers_dim_and_validates_remaining_rows() {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
     let manager = NamespaceManager::new(bucket, minio_options(), test_metrics());
-    let ns = NamespaceId::new(unique_namespace("slice6a-infer")).unwrap();
+    let ns = NamespaceId::new(unique_namespace("dim-inference")).unwrap();
 
     // Row 0 has dim=4, row 1 has dim=6 — must fail with a clear error.
     let err = manager

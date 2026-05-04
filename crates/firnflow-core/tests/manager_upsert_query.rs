@@ -64,7 +64,7 @@ fn unit_vector(axis: usize) -> Vec<f32> {
 async fn upsert_then_query_returns_nearest_neighbor() {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
     let manager = NamespaceManager::new(bucket, minio_options(), test_metrics());
-    let ns = NamespaceId::new(unique_namespace("slice1a")).unwrap();
+    let ns = NamespaceId::new(unique_namespace("upsert-query")).unwrap();
 
     // Four orthogonal unit vectors along the first four axes.
     let rows: Vec<UpsertRow> = vec![
@@ -106,7 +106,7 @@ async fn upsert_then_query_returns_nearest_neighbor() {
 async fn upsert_validates_vector_dimension() {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
     let manager = NamespaceManager::new(bucket, minio_options(), test_metrics());
-    let ns = NamespaceId::new(unique_namespace("slice1a-dim")).unwrap();
+    let ns = NamespaceId::new(unique_namespace("dim-validation")).unwrap();
 
     // Establish the namespace dimension via a valid first upsert.
     let rows: Vec<UpsertRow> = vec![(1u64, unit_vector(0)).into()];

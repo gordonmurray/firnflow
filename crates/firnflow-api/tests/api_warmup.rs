@@ -91,7 +91,7 @@ async fn wait_for_misses(
 #[ignore]
 async fn warmup_returns_202_and_populates_cache() {
     let (app, _tmp, metrics) = build_app_with_metrics().await;
-    let ns = unique_namespace("slice3b");
+    let ns = unique_namespace("warmup-test");
 
     // Upsert some rows so the warmup queries have something to find.
     let upsert_body = json!({

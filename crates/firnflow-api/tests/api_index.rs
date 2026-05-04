@@ -101,7 +101,7 @@ async fn wait_for_index_build(
 #[ignore]
 async fn index_build_returns_202_and_records_metric() {
     let (app, _tmp, metrics) = build_app_with_metrics().await;
-    let ns = unique_namespace("slice6b");
+    let ns = unique_namespace("index-test");
 
     // 1. Upsert 256 rows at dim=32. IVF_PQ needs enough data to
     //    form at least a few partitions — 256 rows is the minimum

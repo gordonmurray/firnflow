@@ -88,7 +88,7 @@ async fn wait_for_index(
 #[ignore]
 async fn vector_fts_and_hybrid_queries() {
     let (app, _tmp, metrics) = build_app_with_metrics().await;
-    let ns = unique_namespace("phase7-fts");
+    let ns = unique_namespace("fts-test");
     // 1. Upsert rows with both vectors and text.
     let upsert_body = json!({
         "rows": [

@@ -46,7 +46,7 @@ async fn post_json(app: axum::Router, uri: String, body: Value) -> (StatusCode, 
 #[ignore]
 async fn delete_removes_namespace_and_invalidates_cache() {
     let (app, _tmp) = build_app().await;
-    let ns = unique_namespace("slice3a");
+    let ns = unique_namespace("delete-test");
 
     // 1. Upsert three rows.
     let upsert_body = json!({

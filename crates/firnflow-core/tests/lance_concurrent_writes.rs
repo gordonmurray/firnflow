@@ -1,9 +1,8 @@
-//! Spike-2b: LanceDB concurrent-writer stress test.
+//! LanceDB concurrent-writer stress test.
 //!
-//! CLAUDE.md § "Known hard problems" 2:
-//! > N writers to the same namespace simultaneously, each appending
-//! > M rows. After all writes complete, query the full table and
-//! > assert row count == N * M.
+//! N writers to the same namespace simultaneously, each appending
+//! M rows. After all writes complete, query the full table and
+//! assert row count == N * M.
 //!
 //! Gated `#[ignore]`: the test talks to MinIO or real AWS S3, both of
 //! which are out-of-process. Run with:
@@ -176,7 +175,7 @@ async fn connect(uri: &str, opts: &HashMap<String, String>) -> lancedb::Connecti
 }
 
 async fn run_stress(uri_base: String, opts: HashMap<String, String>) {
-    let ns = unique_namespace("spike2b");
+    let ns = unique_namespace("concurrent-writers");
     let uri = format!("{uri_base}/{ns}");
     let schema = schema();
 
@@ -237,7 +236,7 @@ async fn concurrent_writers_preserve_all_rows_minio() {
 #[ignore]
 async fn concurrent_writers_preserve_all_rows_aws() {
     if std::env::var("AWS_PROFILE").is_err() {
-        eprintln!("SKIP: AWS_PROFILE not set; real-AWS spike-2b needs a configured CLI profile");
+        eprintln!("SKIP: AWS_PROFILE not set; real-AWS run needs a configured CLI profile");
         return;
     }
     let bucket = env_or("FIRNFLOW_AWS_BUCKET", "firnflow-cloudfloe");
@@ -245,8 +244,8 @@ async fn concurrent_writers_preserve_all_rows_aws() {
     run_stress(uri_base, aws_storage_options()).await;
 }
 
-/// CLAUDE.md § "Known hard problems" 2 demands 100 passing runs as
-/// the definition of done for this spike. Each iteration uses a fresh
+/// 100 passing runs are the project's definition of done for the
+/// concurrent-writer stress test. Each iteration uses a fresh
 /// namespace; total S3 footprint is bounded by (iterations × 800 rows).
 #[tokio::test]
 #[ignore]
@@ -267,7 +266,7 @@ async fn concurrent_writers_100_runs_minio() {
 #[ignore]
 async fn concurrent_writers_100_runs_aws() {
     if std::env::var("AWS_PROFILE").is_err() {
-        eprintln!("SKIP: AWS_PROFILE not set; real-AWS spike-2b needs a configured CLI profile");
+        eprintln!("SKIP: AWS_PROFILE not set; real-AWS run needs a configured CLI profile");
         return;
     }
     const RUNS: usize = 100;

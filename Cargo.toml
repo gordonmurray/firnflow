@@ -14,7 +14,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 # Vector + FTS search engine on object storage.
-# Pinned exact per CLAUDE.md — bumps are a read-the-changelog event.
+# Pinned exact per project conventions — bumps are a read-the-changelog event.
 # `aws` feature registers the S3 object store provider that lance-io
 # otherwise ships turned off through lancedb's transitive deps.
 lancedb = { version = "=0.27.2", features = ["aws"] }
@@ -73,7 +73,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 thiserror = "2"
 anyhow = "1"
 
-# AWS SDK (used for the spike-2 pre-flight and any direct S3 ops;
+# AWS SDK (used for the conditional-write pre-flight and any direct S3 ops;
 # note lancedb brings its own `object_store`-based S3 client internally).
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1", features = ["behavior-version-latest"] }

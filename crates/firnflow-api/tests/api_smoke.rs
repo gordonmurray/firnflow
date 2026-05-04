@@ -68,7 +68,7 @@ async fn health_returns_ok() {
 #[ignore]
 async fn upsert_and_query_round_trip() {
     let (app, _tmp) = build_app().await;
-    let ns = unique_namespace("slice1c");
+    let ns = unique_namespace("smoke-test");
 
     // upsert
     let upsert_body = json!({

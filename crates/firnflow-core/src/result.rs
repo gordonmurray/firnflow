@@ -3,7 +3,7 @@
 //! These types model what a vector / FTS / hybrid search returns and
 //! are the payload the cache layer serialises and stores as bytes.
 //! The design is deliberately simple so that it exercises a realistic
-//! shape for the spike-3 serialisation benchmark without committing
+//! shape for the serialisation benchmark without committing
 //! prematurely to features (metadata, highlighting, etc.) that will
 //! follow once the API layer is wired up.
 

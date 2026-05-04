@@ -3,7 +3,7 @@
 //! Each namespace maps to its own Lance table rooted at
 //! `s3://{bucket}/{namespace}/`.
 //!
-//! **Per-namespace dimensions (slice 6a):** the manager no longer
+//! **Per-namespace dimensions:** the manager no longer
 //! carries a global `vector_dim`. Instead, dimensions are:
 //!
 //! - **inferred** from the first upsert into a fresh namespace

@@ -92,7 +92,7 @@ async fn wait_for_compaction(
 #[ignore]
 async fn compact_reduces_fragments_after_many_upserts() {
     let (app, _tmp, metrics) = build_app_with_metrics().await;
-    let ns = unique_namespace("slice6c");
+    let ns = unique_namespace("compact-test");
     let dim = 8;
 
     // 1. Create fragment explosion: 50 separate upsert calls of

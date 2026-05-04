@@ -1,8 +1,8 @@
 //! firnflow-core — tiered storage primitives for firnflow.
 //!
 //! This crate hosts the foyer-backed cache layer, the namespace
-//! manager, and (in a later spike) the LanceDB wrapper. It is consumed
-//! by `firnflow-api` and `firnflow-bench`.
+//! manager, and the LanceDB wrapper. It is consumed by
+//! `firnflow-api` and `firnflow-bench`.
 
 #![warn(missing_docs)]
 

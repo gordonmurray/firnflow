@@ -1,6 +1,6 @@
-//! Slice-1b integration test: `NamespaceService` cache-aside cycle.
+//! `NamespaceService` cache-aside cycle integration test.
 //!
-//! Proves the full loop where the three spike results meet:
+//! Proves the full loop:
 //!
 //! 1. upsert via the service → rows land in Lance, cache is invalidated
 //! 2. query via the service → cache miss, manager runs the search,
@@ -99,7 +99,7 @@ async fn service_cache_aside_invalidates_on_upsert() {
         Arc::clone(&metrics),
     );
 
-    let ns = NamespaceId::new(unique_namespace("slice1b")).unwrap();
+    let ns = NamespaceId::new(unique_namespace("cache-aside")).unwrap();
     let req = QueryRequest {
         vector: unit_vector(0),
         k: 10,

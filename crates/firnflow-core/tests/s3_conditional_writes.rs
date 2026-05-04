@@ -1,8 +1,8 @@
-//! Spike-2 pre-flight.
+//! Conditional-write pre-flight.
 //!
 //! Verifies that the S3 backend honours `If-None-Match: *` on
 //! PutObject before we trust Lance's CAS-based WAL on top of it.
-//! CLAUDE.md mandates this check: a backend that silently ignores the
+//! This check is required: a backend that silently ignores the
 //! precondition will pass Lance's row-count assertion at low contention
 //! and fail in production.
 //!
@@ -56,7 +56,7 @@ async fn minio_client() -> Client {
 }
 
 /// Real-AWS client: default credential chain (respects `AWS_PROFILE`),
-/// region from `AWS_REGION` or falling back to eu-west-1 per CLAUDE.md.
+/// region from `AWS_REGION` or falling back to eu-west-1.
 async fn aws_client() -> Client {
     let region = env_or("AWS_REGION", "eu-west-1");
     let shared = aws_config::defaults(BehaviorVersion::latest())
@@ -141,7 +141,7 @@ async fn ensure_bucket(client: &Client, bucket: &str) {
 /// The shared assertion: two PUTs with `If-None-Match: *` to the same
 /// key. First must succeed, second must fail with HTTP 412.
 async fn assert_if_none_match_rejects_second_put(client: &Client, bucket: &str) {
-    let key = unique_key("spike2/cond-write");
+    let key = unique_key("preflight/cond-write");
 
     client
         .put_object()
@@ -171,7 +171,7 @@ async fn assert_if_none_match_rejects_second_put(client: &Client, bucket: &str) 
         status, 412,
         "backend must return 412 Precondition Failed on the second If-None-Match=* PUT; \
          got {status}. A backend that silently ignores the precondition will pass at low \
-         contention and fail Lance's CAS-based WAL under load, so do not proceed to spike-2b."
+         contention and fail Lance's CAS-based WAL under load, so do not proceed to the concurrent-writer stress."
     );
 
     // Best-effort cleanup; leaked keys are harmless for a throwaway bucket.

@@ -52,8 +52,8 @@ jobs:
             protobuf-compiler libprotobuf-dev
 
       # Rust 1.94 matches Dockerfile.dev. rustfmt / clippy must be
-      # installed as components up front — CLAUDE.md calls out that
-      # rustup's proxy misreports them as missing otherwise.
+      # installed as components up front — note that rustup's proxy
+      # misreports them as missing otherwise.
       - name: Install Rust 1.94
         uses: dtolnay/rust-toolchain@master
         with:
@@ -110,7 +110,7 @@ jobs:
       # MinIO-backed integration tests are all gated #[ignore] so the
       # previous step skips them. This step opts them in, minus:
       #   * `_aws` variants — need real AWS credentials, not in CI
-      #   * `_100_runs_*` — spike-2 stress suites, overkill per PR
+      #   * `_100_runs_*` — extended stress suites, overkill per PR
       - name: cargo test (integration, MinIO-backed)
         run: |
           cargo test --workspace --no-fail-fast -- \

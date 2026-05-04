@@ -1,22 +1,17 @@
-//! Namespace service — the layer where the three spike results
-//! finally meet.
+//! Namespace service — combines the Lance backend, the foyer hybrid
+//! cache, and the bincode result-payload format into a single
+//! cache-aside read path with invalidate-on-write.
 //!
-//! Combines:
-//!
-//! * [`NamespaceManager`] — the Lance backend (spike-2)
+//! * [`NamespaceManager`] — the Lance backend
 //! * [`NamespaceCache`] — foyer hybrid cache + generation counter
-//!   (spike-1)
 //! * bincode-2 serde path — the cached result payload format
-//!   (spike-3, ADR-002)
 //!
-//! into a single cache-aside read path with invalidate-on-write.
-//! The axum handlers in slice 1c own an `Arc<NamespaceService>`
-//! and call straight into `upsert` / `query`.
+//! The axum handlers own an `Arc<NamespaceService>` and call
+//! straight into `upsert` / `query`.
 //!
-//! Instrumentation (slice 2a): every call records query/write
-//! duration histograms and an `s3_requests_total` counter. The
-//! cache hit/miss counters live on the cache itself — see
-//! [`NamespaceCache::get_or_populate`].
+//! Every call records query/write duration histograms and an
+//! `s3_requests_total` counter. The cache hit/miss counters live on
+//! the cache itself — see [`NamespaceCache::get_or_populate`].
 
 use std::sync::Arc;
 use std::time::Instant;

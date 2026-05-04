@@ -21,7 +21,7 @@
 //!   case the single-key fallback promotes the write key to admin
 //!   authority for the duration of the deployment.
 //!
-//! Status codes (concern (4) of `ISSUE_2_CONCERNS.md`):
+//! Status codes:
 //!
 //! | Situation                                   | Status |
 //! | ------------------------------------------- | ------ |
@@ -54,8 +54,8 @@ use crate::error::ApiError;
 const FALLBACK_PEER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
 /// Reserved label values for `firnflow_auth_rejections_total{reason}`.
-/// Centralised so call sites do not drift away from the cardinality
-/// CLAUDE.md documents.
+/// Centralised so call sites do not drift away from the documented
+/// cardinality.
 pub mod rejection_reason {
     pub const MISSING: &str = "missing";
     pub const INVALID: &str = "invalid";

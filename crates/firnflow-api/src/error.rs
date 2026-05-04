@@ -1,11 +1,11 @@
 //! API error type with axum `IntoResponse` integration.
 //!
-//! Promoted from a newtype-over-`FirnflowError` to an enum in 0.5.0
-//! (concern (8) of `ISSUE_2_CONCERNS.md`). API-layer-only conditions
-//! — bearer-token rejection, scope mismatch, rate-limit shedding —
-//! are real variants now rather than synthetic `FirnflowError`s
-//! squeezed through a wrapper. `From<FirnflowError>` is preserved so
-//! handlers continue to use `?` on core calls.
+//! Promoted from a newtype-over-`FirnflowError` to an enum in 0.5.0.
+//! API-layer-only conditions — bearer-token rejection, scope
+//! mismatch, rate-limit shedding — are real variants now rather than
+//! synthetic `FirnflowError`s squeezed through a wrapper.
+//! `From<FirnflowError>` is preserved so handlers continue to use
+//! `?` on core calls.
 
 use std::time::Duration;
 
