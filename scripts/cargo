@@ -18,9 +18,9 @@ fi
 mkdir -p "${PROJECT_ROOT}/.cargo-cache"
 
 # Mount the host's ~/.aws read-only when AWS_PROFILE is set so that
-# spike-2 tests can reach real AWS S3 via the host's configured
-# credentials. Path redirected to /aws so we don't conflict with
-# the container's HOME layout.
+# the AWS-backed conditional-write tests can reach real AWS S3 via
+# the host's configured credentials. Path redirected to /aws so we
+# don't conflict with the container's HOME layout.
 AWS_MOUNT_ARGS=()
 if [ -n "${AWS_PROFILE:-}" ] && [ -d "${HOME}/.aws" ]; then
     AWS_MOUNT_ARGS+=(

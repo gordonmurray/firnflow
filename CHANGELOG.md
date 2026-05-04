@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - DigitalOcean Spaces is a validated storage backend. The `If-None-Match: *` pre-flight returns 412 on the second PUT and a 100-iteration concurrent-writer stress run produced 800/800 rows on every iteration with zero discrepancies, validated against `firn-sample-bucket` in the London (`lon1`) region. Per-iteration wall time is ~3.10 s, the same performance class as AWS `eu-west-1` and the fastest non-AWS backend tested. The README compatibility matrix is updated; deployment requires the regional endpoint (`https://<region>.digitaloceanspaces.com`) and path-style addressing, the same client-side quirk that affects Cloudflare R2 and Tigris on `object_store` 0.12. Test functions live alongside the existing per-provider blocks in `crates/firnflow-core/tests/s3_conditional_writes.rs` and `crates/firnflow-core/tests/lance_concurrent_writes.rs`. Closes #29.
 
 ### Changed
-- Tigris is now a validated storage backend. The 2026-04-17 concurrent-stress failure (silent write loss under contention on both dual-region and single-region buckets) was fixed upstream. A 2026-04-19 re-run of the 100-iteration stress passed cleanly on both `firn-tigris-bucket` (dual-region, 375 s) and `firn-tigris-single-region` (291 s). The README compatibility matrix and `notes/providers/tigris.md` are updated; the original failure record is preserved in the provider writeup for provenance.
+- Tigris is now a validated storage backend. The 2026-04-17 concurrent-stress failure (silent write loss under contention on both dual-region and single-region buckets) was fixed upstream. A 2026-04-19 re-run of the 100-iteration stress passed cleanly on both `firn-tigris-bucket` (dual-region, 375 s) and `firn-tigris-single-region` (291 s). The README compatibility matrix is updated.
 
 ## [0.3.0] - 2026-04-18
 
@@ -86,9 +86,9 @@ development through phases 1 through 8 before being made public;
   namespace creation, and full cleanup on delete.
 - Cache-aside read path with after-success invalidation. Keyed on
   `(namespace, generation, query_hash)` using a per-namespace
-  atomic generation counter for O(1) invalidation (ADR-001).
+  atomic generation counter for O(1) invalidation.
 - bincode-2 serialisation path for cached result sets with a
-  100-result p99 round-trip well inside the 1 ms budget (ADR-002).
+  100-result p99 round-trip well inside the 1 ms budget.
 - IVF_PQ vector indexing via `POST /ns/{ns}/index`, BM25 FTS
   indexing via `POST /ns/{ns}/fts-index`, compaction via
   `POST /ns/{ns}/compact`. All three run as non-blocking

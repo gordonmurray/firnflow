@@ -1,8 +1,8 @@
 //! Prometheus metric handles plumbed through the library layers.
 //!
 //! [`CoreMetrics`] owns a `prometheus::Registry` plus typed counter,
-//! histogram and gauge handles for the exact metric set CLAUDE.md
-//! names:
+//! histogram and gauge handles for the metric set the project
+//! exposes:
 //!
 //! * `firnflow_cache_hits_total{namespace}`
 //! * `firnflow_cache_misses_total{namespace}`

@@ -90,7 +90,7 @@ fn metric_value(body: &str, metric: &str, label_needle: &str) -> Option<f64> {
 #[ignore]
 async fn metrics_reflect_cache_hits_misses_and_s3_asymmetry() {
     let (app, _tmp) = build_app().await;
-    let ns = unique_namespace("slice2a");
+    let ns = unique_namespace("metrics-test");
 
     // 1. Upsert (records s3_requests{op=upsert} and write_duration)
     let upsert_body = json!({

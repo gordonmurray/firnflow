@@ -1,4 +1,4 @@
-# Serialisation benchmark — spike-3 baseline
+# Serialisation benchmark — initial baseline
 
 - **Date**: 2026-04-11
 - **Benchmark**: `crates/firnflow-core/benches/serialisation.rs`
@@ -27,14 +27,13 @@ decode/1000     6153518    1462.33 µs    1629.96 µs    2855.22 µs    4181.56 
 rt/1000         6153518    2598.19 µs    2765.51 µs    3023.14 µs    7468.15 µs
 ```
 
-## Decision gate (CLAUDE.md § 3)
+## Decision gate
 
 > If bincode round-trip exceeds 1 ms at p99 for 100-result sets,
 > evaluate rkyv and flatbuffers as alternatives.
 
 **100-result round-trip p99 = 317.64 µs ≈ 0.32 ms.** The gate does
-not trigger. See `docs/adr/002-result-serialisation.md` for the
-full decision and alternative analysis.
+not trigger; bincode 2 stays as the cached-result format.
 
 ## Observations
 
@@ -47,10 +46,10 @@ full decision and alternative analysis.
   (bincode's `borrow_decode` or rkyv's zero-copy read) would
   eliminate it.
 - **1000-result tier exceeds 1 ms round-trip** (p99 ≈ 3 ms). This is
-  above the threshold CLAUDE.md set for the 100-result tier but
-  below the threshold for 1000. The spec only gates on 100, so we
-  accept bincode, but the 1000-result number is called out in the
-  ADR as the trigger for a future re-evaluation.
+  above the threshold the project sets for the 100-result tier but
+  below the threshold for 1000. The 100-result tier is the gating
+  decision, so we accept bincode; the 1000-result number is the
+  trigger for a future re-evaluation if real workloads land there.
 - **Encode size is ~6144 bytes per result plus framing.** The raw
   vector is 1536 × 4 = 6144 bytes, so bincode's `config::standard()`
   adds roughly 12 bytes of framing per result — negligible

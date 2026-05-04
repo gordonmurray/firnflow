@@ -1,4 +1,4 @@
-# Cold vs warm query latency — slice 2b baseline
+# Cold vs warm query latency — initial baseline
 
 - **Date**: 2026-04-11
 - **Harness**: `./scripts/cargo run --release -p firnflow-bench`
@@ -28,6 +28,6 @@ The load-bearing observation: **50 query-kind S3 requests for 50 cold queries, t
 
 ## Notes
 
-- `s3_requests_total` counts firnflow-initiated S3-bound *operations* at the service boundary, not raw HTTP requests to S3 — see the help text on the metric and CLAUDE.md § "Known hard problems" 3 for the approximation caveat.
+- `s3_requests_total` counts firnflow-initiated S3-bound *operations* at the service boundary, not raw HTTP requests to S3 — see the help text on the metric for the approximation caveat.
 - Each run starts cold: the bench uses a fresh `tempfile::tempdir` for the foyer NVMe tier and a fresh namespace timestamp so nothing is reused between runs.
 - The vector dimension here (32) is deliberately smaller than the 1536 used in the serialisation benchmark so the run completes in seconds against MinIO over the `--network host` loopback. Bump it for production-representative numbers.

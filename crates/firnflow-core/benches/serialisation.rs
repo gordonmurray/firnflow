@@ -1,19 +1,15 @@
-//! Spike-3 benchmark: serialisation round-trip for cached query
-//! result sets.
+//! Serialisation round-trip benchmark for cached query result sets.
 //!
-//! CLAUDE.md § "Known hard problems" 3:
-//!
-//! > Benchmark serialise + deserialise round-trip time against
-//! > realistic result set sizes: 10 results, 100 results, 1000
-//! > results, each with a 1536-dim vector payload. If bincode
-//! > round-trip exceeds 1 ms at p99 for 100-result sets, evaluate
-//! > rkyv and flatbuffers as alternatives.
+//! Measures encode + decode time at realistic result-set sizes (10,
+//! 100, and 1000 results, each with a 1536-dim vector payload).
+//! Project conventions gate the design choice on the 100-result p99
+//! crossing 1 ms — past that we'd evaluate rkyv and flatbuffers as
+//! alternatives.
 //!
 //! `harness = false` in Cargo.toml means this file is compiled as a
 //! plain binary with its own `main`, which lets us hand-roll exact
 //! p50/p95/p99 measurement — criterion's default stdout doesn't
-//! print p99, and CLAUDE.md gates the design decision on p99
-//! specifically.
+//! print p99, and the design decision is gated on p99 specifically.
 //!
 //! Run with:
 //!

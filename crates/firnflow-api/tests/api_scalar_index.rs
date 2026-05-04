@@ -115,8 +115,7 @@ fn metric_value(body: &str, metric: &str, label_needle: &str) -> Option<f64> {
 /// `(namespace, kind)` pair reaches `expected`, or the deadline
 /// expires. Returns the last observed count.
 ///
-/// Prometheus emits labels alphabetically (`kind` before `namespace`)
-/// — see CLAUDE.md "Prometheus label ordering is alphabetical."
+/// Prometheus emits labels alphabetically (`kind` before `namespace`).
 async fn wait_for_index_build(
     metrics: &Arc<CoreMetrics>,
     ns: &str,

@@ -1,4 +1,4 @@
-# Cold vs warm query latency — realistic parameters (slice 6d)
+# Cold vs warm query latency — realistic parameters
 
 - **Date**: 2026-04-12
 - **Harness**: `./scripts/cargo run --release -p firnflow-bench`

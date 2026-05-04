@@ -396,7 +396,7 @@ async fn main() -> anyhow::Result<()> {
     let storage_mb = (cfg.rows as f64 * cfg.dim as f64 * 4.0) / (1024.0 * 1024.0);
 
     let out = format!(
-        "# Cold vs warm query latency — realistic parameters (slice 6d)\n\
+        "# Cold vs warm query latency — realistic parameters\n\
 \n\
 - **Date**: {date}\n\
 - **Harness**: `./scripts/cargo run --release -p firnflow-bench`\n\

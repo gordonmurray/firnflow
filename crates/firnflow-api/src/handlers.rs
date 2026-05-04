@@ -77,7 +77,7 @@ pub struct UpsertRequest {
 #[derive(Debug, Serialize)]
 pub struct UpsertResponse {
     /// Number of rows accepted for append. Matches `rows.len()` on the
-    /// request — there is no per-row failure reporting in slice 1c.
+    /// request — there is no per-row failure reporting yet.
     pub upserted: usize,
 }
 
@@ -132,8 +132,8 @@ pub async fn delete(
 
 /// Async cache-warmup hint.
 ///
-/// CLAUDE.md: *"the warmup endpoint must be non-blocking: it
-/// spawns an async task and returns 202 immediately"*.
+/// The warmup endpoint is non-blocking: it spawns an async task and
+/// returns 202 immediately.
 ///
 /// The handler validates the namespace, spawns a `tokio::task`
 /// that runs each query from the request body through
@@ -176,7 +176,7 @@ pub struct IndexResponse {
     pub status: String,
 }
 
-/// Explicit ANN index build (slice 6b).
+/// Explicit ANN index build.
 ///
 /// Spawns a background task that builds an IVF_PQ index on the
 /// namespace's vector column and returns `202 Accepted` immediately.
@@ -291,7 +291,7 @@ pub struct CompactResponse {
     pub status: String,
 }
 
-/// Explicit compaction (slice 6c).
+/// Explicit compaction.
 ///
 /// Spawns a background task that merges small data files into
 /// fewer, larger ones and returns `202 Accepted` immediately.
