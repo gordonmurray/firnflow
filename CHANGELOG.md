@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-04
+
 ### Added
 - Bearer-token authentication on the REST API. Two static keys, both opt-in via env: `FIRNFLOW_API_KEY` for the read/write tier (`upsert`, `query`, `list`, `warmup`) and `FIRNFLOW_ADMIN_API_KEY` for the destructive tier (`delete`, `index`, `fts-index`, `scalar-index`, `compact`). When neither is set the API stays open with a single startup `WARN`, preserving 0.4.x behaviour for existing dev compose stacks. Header format is the standard `Authorization: Bearer <token>`; comparisons are constant-time via `subtle::ConstantTimeEq`. If only `FIRNFLOW_API_KEY` is configured, it authorises admin routes too (single-key fallback). Status codes: missing/malformed/unknown token → 401 with `WWW-Authenticate: Bearer realm="firnflow"`; valid token but insufficient scope → 403. **Service-level only** — any holder of `FIRNFLOW_API_KEY` can read or write any namespace. Per-tenant namespace isolation requires an authenticating gateway in front of firnflow.
 - Optional bearer-token gate for `/metrics` via `FIRNFLOW_METRICS_TOKEN`. Same Bearer parser, so Prometheus's `bearer_token` / `bearer_token_file` scrape config works unchanged. `/metrics` stays public when the token is unset (preserves 0.4.x behaviour).
@@ -104,7 +106,8 @@ development through phases 1 through 8 before being made public;
   benchmark at dim=1536, 100k rows available at
   `bench/results/cold_vs_warm_aws.md`.
 
-[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/gordonmurray/firnflow/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/gordonmurray/firnflow/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/gordonmurray/firnflow/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/gordonmurray/firnflow/compare/v0.1.0...v0.2.0
