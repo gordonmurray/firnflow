@@ -32,6 +32,24 @@ if [ -n "${AWS_PROFILE:-}" ] && [ -d "${HOME}/.aws" ]; then
     )
 fi
 
+# Mount the GCS service-account JSON read-only when
+# GOOGLE_APPLICATION_CREDENTIALS (or GOOGLE_SERVICE_ACCOUNT_PATH) points
+# at an existing file on the host. Path redirected to /gcs/key.json
+# inside the container.
+GCS_MOUNT_ARGS=()
+GCS_KEY_HOST_PATH=""
+if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ] && [ -f "${GOOGLE_APPLICATION_CREDENTIALS}" ]; then
+    GCS_KEY_HOST_PATH="${GOOGLE_APPLICATION_CREDENTIALS}"
+elif [ -n "${GOOGLE_SERVICE_ACCOUNT_PATH:-}" ] && [ -f "${GOOGLE_SERVICE_ACCOUNT_PATH}" ]; then
+    GCS_KEY_HOST_PATH="${GOOGLE_SERVICE_ACCOUNT_PATH}"
+fi
+if [ -n "${GCS_KEY_HOST_PATH}" ]; then
+    GCS_MOUNT_ARGS+=(
+        -v "${GCS_KEY_HOST_PATH}:/gcs/key.json:ro"
+        -e "GOOGLE_APPLICATION_CREDENTIALS=/gcs/key.json"
+    )
+fi
+
 exec docker run --rm --init \
     --network host \
     --user "$(id -u):$(id -g)" \
@@ -75,7 +93,9 @@ exec docker run --rm --init \
     ${SPACES_SECRET_KEY:+-e SPACES_SECRET_KEY="$SPACES_SECRET_KEY"} \
     ${SPACES_BUCKET:+-e SPACES_BUCKET="$SPACES_BUCKET"} \
     ${SPACES_REGION:+-e SPACES_REGION="$SPACES_REGION"} \
+    ${GOOGLE_SERVICE_ACCOUNT_KEY:+-e GOOGLE_SERVICE_ACCOUNT_KEY="$GOOGLE_SERVICE_ACCOUNT_KEY"} \
     "${AWS_MOUNT_ARGS[@]}" \
+    "${GCS_MOUNT_ARGS[@]}" \
     -w /work \
     "${IMAGE}" \
     cargo "$@"
