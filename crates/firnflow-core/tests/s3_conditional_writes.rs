@@ -6,7 +6,15 @@
 //! precondition will pass Lance's row-count assertion at low contention
 //! and fail in production.
 //!
-//! Both tests are `#[ignore]`'d because they talk to out-of-process
+//! GCS gets two extra tests at the bottom of this file because its
+//! S3-interop endpoint silently drops `If-None-Match: *`. Those tests
+//! use the native `object_store::gcp` client with `PutMode::Create` —
+//! the same code path that future native-GCS Firn support will rely
+//! on — and prove (a) the precondition fires sequentially and (b) it
+//! survives a contended-key race. Distinct-key stress is not a CAS
+//! test — every writer succeeds because there is no contention.
+//!
+//! All tests are `#[ignore]`'d because they talk to out-of-process
 //! services. Run with:
 //!
 //! ```text
@@ -19,7 +27,16 @@
 //! AWS_PROFILE=cloudfloe ./scripts/cargo test -p firnflow-core \
 //!     --test s3_conditional_writes \
 //!     put_object_with_if_none_match_rejects_second_write_aws -- --ignored --nocapture
+//!
+//! # GCS native conditional-write verification (needs a service-account
+//! # JSON with Storage Object Admin on the test bucket)
+//! GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json \
+//! GCS_BUCKET=firn-gcs-bucket \
+//! ./scripts/cargo test -p firnflow-core --test s3_conditional_writes \
+//!     gcs_native -- --ignored --nocapture
 //! ```
+
+use std::sync::Arc;
 
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
 use aws_sdk_s3::error::SdkError;
@@ -272,4 +289,216 @@ async fn put_object_with_if_none_match_rejects_second_write_gcs() {
         return;
     };
     assert_if_none_match_rejects_second_put(&client, &bucket).await;
+}
+
+// -----------------------------------------------------------------------------
+// GCS native conditional-write verification.
+//
+// `If-None-Match: *` is silently ignored on storage.googleapis.com; see
+// the existing GCS row in the README compatibility matrix. The native
+// path uses `object_store::gcp::GoogleCloudStorage` with
+// `PutMode::Create`, which sets `x-goog-if-generation-match: 0` on the
+// GCS XML PUT API ("fail if any version of this object exists"). This
+// is the same code path that future native-GCS Firn support will rely
+// on, so the test exercises the production mechanism rather than a
+// third-party HTTP shape.
+//
+// An earlier iteration of these tests injected
+// `x-goog-if-generation-match: 0` via the AWS SDK's
+// `.customize().mutate_request()` hook. That approach is fundamentally
+// incompatible with the AWS interop layer: the SDK auto-adds
+// `x-amz-content-sha256` / `x-amz-date` during SigV4 signing, GCS
+// rejects any request that mixes `x-amz-*` and `x-goog-*` header
+// families with HTTP 400 `ExcessHeaderValues`, and the rejection
+// happens before the precondition is even evaluated. The native
+// `object_store::gcp` client hits the same XML PUT endpoint but
+// authenticates with Google-native OAuth2 bearer tokens instead of
+// SigV4 HMAC, so no `x-amz-*` headers are sent and the header-family
+// clash never occurs.
+// -----------------------------------------------------------------------------
+
+use object_store::gcp::GoogleCloudStorageBuilder;
+use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
+
+/// Build a GCS object store from environment for the native-CAS tests.
+/// Returns `None` when the test should SKIP (missing config), and
+/// panics if config is present but the build itself fails — a partially
+/// configured environment is a misconfiguration, not a reason to
+/// pretend the test passed.
+fn gcs_native_store() -> Option<Arc<dyn ObjectStore>> {
+    let bucket = std::env::var("GCS_BUCKET").ok()?;
+    // Require *some* form of service-account credentials before we
+    // bother building the client, so a missing config block surfaces
+    // as a SKIP rather than a downstream auth error.
+    if std::env::var("GOOGLE_APPLICATION_CREDENTIALS").is_err()
+        && std::env::var("GOOGLE_SERVICE_ACCOUNT_PATH").is_err()
+        && std::env::var("GOOGLE_SERVICE_ACCOUNT_KEY").is_err()
+    {
+        return None;
+    }
+    let store = GoogleCloudStorageBuilder::from_env()
+        .with_bucket_name(&bucket)
+        .build()
+        .expect("GoogleCloudStorageBuilder::build() failed; check service-account JSON path and bucket name");
+    Some(Arc::new(store))
+}
+
+#[tokio::test]
+#[ignore]
+async fn put_with_create_mode_rejects_second_write_gcs_native() {
+    let Some(store) = gcs_native_store() else {
+        eprintln!(
+            "SKIP: set GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS \
+             (or GOOGLE_SERVICE_ACCOUNT_PATH / GOOGLE_SERVICE_ACCOUNT_KEY) \
+             to run the GCS native-CAS pre-flight"
+        );
+        return;
+    };
+
+    let key = unique_key("preflight/native-cas");
+    let path = ObjectPath::from(key.as_str());
+
+    store
+        .put_opts(
+            &path,
+            PutPayload::from_static(b"first"),
+            PutOptions {
+                mode: PutMode::Create,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("first PutMode::Create on an empty key must succeed");
+
+    let err = store
+        .put_opts(
+            &path,
+            PutPayload::from_static(b"second"),
+            PutOptions {
+                mode: PutMode::Create,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("second PutMode::Create must fail because the object now exists");
+
+    assert!(
+        matches!(err, object_store::Error::AlreadyExists { .. }),
+        "second PutMode::Create on an existing key must surface as \
+         object_store::Error::AlreadyExists; got {err:?}. GCS must reject the \
+         second write to confirm the native generation precondition fires."
+    );
+
+    let _ = store.delete(&path).await;
+}
+
+/// Contended-key CAS microstress. Distinct-key stress does not test
+/// CAS — every writer succeeds because there is no contention. The
+/// only useful shape is N writers racing the SAME key. Exactly one
+/// must observe a successful PUT; every other writer must observe an
+/// `AlreadyExists` error.
+///
+/// A `tokio::sync::Barrier` is the load-bearing detail. Without it,
+/// the first task spawned can finish its PUT before later tasks are
+/// in flight, which weakens "contended" to "rapid sequential" — a
+/// shape the precondition would also satisfy without serving any
+/// linearisability evidence. Every task is held at the barrier
+/// before request building begins; once all WRITERS tasks have
+/// reached the gate they proceed together to construct and send
+/// their PUTs.
+#[tokio::test]
+#[ignore]
+async fn contended_key_create_mode_serialises_writers_gcs_native() {
+    use tokio::sync::Barrier;
+
+    const WRITERS: usize = 8;
+    const ITERATIONS: usize = 100;
+
+    let Some(store) = gcs_native_store() else {
+        eprintln!(
+            "SKIP: set GCS_BUCKET and GOOGLE_APPLICATION_CREDENTIALS \
+             (or GOOGLE_SERVICE_ACCOUNT_PATH / GOOGLE_SERVICE_ACCOUNT_KEY) \
+             to run the GCS native-CAS contended-key stress"
+        );
+        return;
+    };
+
+    for iter in 1..=ITERATIONS {
+        let key = unique_key(&format!("preflight/native-cas-race-{iter:03}"));
+        let path = ObjectPath::from(key.as_str());
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let mut handles = Vec::with_capacity(WRITERS);
+
+        for w in 0..WRITERS {
+            let store = Arc::clone(&store);
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            // Distinct payloads make divergence visible if the
+            // assertion ever fails: a quick GET after the test tells
+            // you which writer's body landed.
+            let body: &'static [u8] = match w {
+                0 => b"writer-0",
+                1 => b"writer-1",
+                2 => b"writer-2",
+                3 => b"writer-3",
+                4 => b"writer-4",
+                5 => b"writer-5",
+                6 => b"writer-6",
+                _ => b"writer-7",
+            };
+            handles.push(tokio::spawn(async move {
+                // Hold every writer at the gate until all WRITERS
+                // tasks have reached this point. Building the request
+                // and the put_opts call both happen after release, so
+                // all tasks race the same starting line.
+                barrier.wait().await;
+                store
+                    .put_opts(
+                        &path,
+                        PutPayload::from_static(body),
+                        PutOptions {
+                            mode: PutMode::Create,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+            }));
+        }
+
+        let mut wins = 0usize;
+        let mut already_exists = 0usize;
+        let mut other_failures = Vec::new();
+        for h in handles {
+            match h.await.expect("writer task panicked") {
+                Ok(_) => wins += 1,
+                Err(object_store::Error::AlreadyExists { .. }) => already_exists += 1,
+                Err(other) => other_failures.push(format!("{other:?}")),
+            }
+        }
+
+        assert!(
+            other_failures.is_empty(),
+            "iteration {iter}: contended-key race produced unexpected error types: \
+             {other_failures:?}"
+        );
+        assert_eq!(
+            wins, 1,
+            "iteration {iter}: exactly one writer must win the contended race on \
+             key {key}; got {wins} wins and {already_exists} AlreadyExists out of \
+             {WRITERS} writers"
+        );
+        assert_eq!(
+            already_exists,
+            WRITERS - 1,
+            "iteration {iter}: all losing writers must observe AlreadyExists on \
+             key {key}; got {wins} wins and {already_exists} AlreadyExists out of \
+             {WRITERS} writers"
+        );
+
+        let _ = store.delete(&path).await;
+        if iter % 10 == 0 {
+            eprintln!("gcs native-cas contended-key race {iter}/{ITERATIONS} clean");
+        }
+    }
 }

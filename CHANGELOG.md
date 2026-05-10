@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Two ignored tests that verify GCS's native conditional-write precondition (`x-goog-if-generation-match: 0` on the GCS XML API) through the `object_store::gcp` client with `PutMode::Create`, both passing cleanly against `firn-gcs-bucket` on 2026-05-10. `crates/firnflow-core/tests/s3_conditional_writes.rs` now contains a sequential pre-flight (two creates against the same key — the first must succeed, the second must surface as `object_store::Error::AlreadyExists`) and a contended-key microstress (8 writers, gated on a `tokio::sync::Barrier`, race the same key for 100 iterations; exactly one wins, the other seven each see `AlreadyExists`). Distinct-key stress is omitted on purpose — every writer succeeds when there is no contention, so it does not exercise CAS at all. The tests run against a service-account JSON via `GOOGLE_APPLICATION_CREDENTIALS` (or `GOOGLE_SERVICE_ACCOUNT_PATH` / `GOOGLE_SERVICE_ACCOUNT_KEY`) plus `GCS_BUCKET`. They share the same code path that future native-GCS Firn support will rely on, so the verification exercises the production mechanism rather than a third-party HTTP shape. The `gcp` feature on `object_store` is enabled as a dev-only dependency in `firnflow-core`; the production feature surface stays on `aws` until native GCS support lands. `scripts/cargo` now mounts a service-account JSON into the dev container and passes the standard `GOOGLE_*` env vars through, so the new tests can be run end-to-end through the existing toolchain wrapper. The README compatibility matrix is updated to record the empirical result rather than asserting "works correctly" on Google's docs alone. GCS remains ❌ in the supported-backend column until a follow-up release routes Firn's writes through LanceDB's native GCS backend instead of the S3-interop endpoint. Closes #36.
+
 ## [0.5.0] - 2026-05-04
 
 ### Added

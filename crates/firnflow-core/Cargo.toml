@@ -27,6 +27,11 @@ object_store.workspace = true
 tempfile = "3"
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
+# Test-only enablement of object_store's `gcp` backend so the GCS
+# native-CAS tests can exercise PutMode::Create against
+# storage.googleapis.com. The production feature surface stays at
+# `["aws"]` until native GCS support lands as part of a future release.
+object_store = { workspace = true, features = ["gcp"] }
 
 [[bench]]
 name = "serialisation"
