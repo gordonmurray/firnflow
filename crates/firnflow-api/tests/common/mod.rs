@@ -16,7 +16,7 @@ use firnflow_api::rate_limit::RateLimitSettings;
 use firnflow_api::AppState;
 use firnflow_core::cache::NamespaceCache;
 use firnflow_core::metrics::test_metrics;
-use firnflow_core::{NamespaceManager, NamespaceService};
+use firnflow_core::{NamespaceManager, NamespaceService, StorageRoot};
 
 /// Read an env var with a default. Used to override MinIO defaults
 /// in CI where the bucket and endpoint may differ from local dev.
@@ -69,11 +69,12 @@ pub async fn test_state_with_auth(
     rate_limit: RateLimitSettings,
 ) -> (AppState, tempfile::TempDir) {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
+    let storage_root = StorageRoot::s3_bucket(&bucket).expect("test bucket name");
     let tmp = tempfile::tempdir().unwrap();
     let metrics = test_metrics();
 
     let manager = Arc::new(NamespaceManager::new(
-        bucket,
+        storage_root,
         minio_options(),
         Arc::clone(&metrics),
     ));
@@ -122,7 +123,7 @@ pub async fn test_state_offline_with_auth(
     // handler runs. Use an obviously-fake hostname so any accidental
     // touch fails loudly rather than racing with a real MinIO.
     let manager = Arc::new(NamespaceManager::new(
-        "firnflow-offline".to_string(),
+        StorageRoot::s3_bucket("firnflow-offline").unwrap(),
         HashMap::from([
             (
                 "aws_endpoint".into(),
@@ -167,7 +168,7 @@ pub async fn test_state_offline_with_auth(
 pub fn dummy_config() -> AppConfig {
     AppConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
-        bucket: "firnflow-offline".into(),
+        storage_root: StorageRoot::s3_bucket("firnflow-offline").unwrap(),
         cache_memory_bytes: 4 * 1024 * 1024,
         cache_nvme_path: std::env::temp_dir(),
         cache_nvme_bytes: 16 * 1024 * 1024,

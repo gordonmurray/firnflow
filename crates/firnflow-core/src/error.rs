@@ -26,10 +26,13 @@ pub enum FirnflowError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 
-    /// The requested operation is not supported on this namespace,
-    /// typically because its schema pre-dates a feature. Maps to
-    /// HTTP 501 at the API layer.
-    #[error("operation not supported on this namespace: {0}")]
+    /// The requested operation or configuration is not supported by
+    /// this build. Two callers today: a namespace-level operation
+    /// whose Lance schema pre-dates a feature (the `/list` endpoint
+    /// surfaces this as HTTP 501), and a startup-time storage URI
+    /// using a scheme this build does not yet route (e.g. `gs://`
+    /// before native GCS support ships).
+    #[error("unsupported: {0}")]
     Unsupported(String),
 
     /// A metrics registry or encoding operation failed.

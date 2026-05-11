@@ -71,7 +71,7 @@ pub async fn build_state(cfg: &AppConfig) -> anyhow::Result<AppState> {
         Arc::new(CoreMetrics::new().map_err(|e| anyhow::anyhow!("build metrics registry: {e}"))?);
 
     let manager = Arc::new(NamespaceManager::new(
-        cfg.bucket.clone(),
+        cfg.storage_root.clone(),
         cfg.storage_options.clone(),
         Arc::clone(&metrics),
     ));

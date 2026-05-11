@@ -58,7 +58,8 @@ use object_store::ObjectStore;
 use crate::metrics::CoreMetrics;
 use crate::query::DEFAULT_NPROBES;
 use crate::result::{ListOrder, ListPage, ListRow};
-use crate::{FirnflowError, NamespaceId, QueryResult, QueryResultSet};
+use crate::storage_root::Scheme;
+use crate::{FirnflowError, NamespaceId, QueryResult, QueryResultSet, StorageRoot};
 
 const TABLE_NAME: &str = "data";
 const DISTANCE_COLUMN: &str = "_distance";
@@ -122,7 +123,8 @@ struct NamespaceHandle {
     table: lancedb::Table,
 }
 
-/// Namespace manager over an S3-backed set of Lance tables.
+/// Namespace manager over an object-storage-backed set of Lance
+/// tables.
 ///
 /// Each namespace independently determines its own vector dimension
 /// — either inferred from the first upsert or read from the
@@ -131,10 +133,10 @@ struct NamespaceHandle {
 ///
 /// The manager caches an `lancedb::Connection` + `lancedb::Table`
 /// per namespace in an internal `DashMap` so repeat operations on
-/// the same namespace avoid the S3 credential-resolution and
+/// the same namespace avoid the credential-resolution and
 /// manifest-read round-trip of a fresh `lancedb::connect()`.
 pub struct NamespaceManager {
-    bucket: String,
+    storage_root: StorageRoot,
     storage_options: HashMap<String, String>,
     /// Per-namespace schema facts. Populated on first interaction
     /// (upsert or query). Carries the resolved vector dimension and
@@ -151,12 +153,13 @@ pub struct NamespaceManager {
 impl NamespaceManager {
     /// Construct a new manager.
     ///
-    /// * `bucket` – S3 bucket that roots every namespace this
-    ///   manager serves. Namespace tables live at
-    ///   `s3://{bucket}/{namespace}/`.
+    /// * `storage_root` – the parsed [`StorageRoot`] every namespace
+    ///   under this manager lives under. Namespace tables live at
+    ///   `{root}/{namespace}/`, where `{root}` includes the scheme,
+    ///   bucket, and any optional fixed prefix.
     /// * `storage_options` – `object_store`-style key/value options
     ///   passed verbatim to lancedb's connection builder. Use
-    ///   `aws_endpoint` / `aws_access_key_id` / etc. keys.
+    ///   `aws_endpoint` / `aws_access_key_id` / etc. keys for S3.
     /// * `metrics` – process-wide metrics registry; the manager
     ///   adjusts `firnflow_cached_handles` as connection pool
     ///   entries are added and removed.
@@ -168,17 +171,24 @@ impl NamespaceManager {
     /// — no such mechanism exists today. For V1 we document this
     /// as a known single-process assumption.
     pub fn new(
-        bucket: impl Into<String>,
+        storage_root: StorageRoot,
         storage_options: HashMap<String, String>,
         metrics: Arc<CoreMetrics>,
     ) -> Self {
         Self {
-            bucket: bucket.into(),
+            storage_root,
             storage_options,
             schema_info: DashMap::new(),
             handles: DashMap::new(),
             metrics,
         }
+    }
+
+    /// The configured storage root. Exposed for diagnostics and
+    /// tests; consumers should not need to reach in this far during
+    /// normal operation.
+    pub fn storage_root(&self) -> &StorageRoot {
+        &self.storage_root
     }
 
     /// Resolved vector dimension for a namespace, if known. Returns
@@ -214,7 +224,7 @@ impl NamespaceManager {
     }
 
     fn uri(&self, ns: &NamespaceId) -> String {
-        format!("s3://{}/{}", self.bucket, ns.as_str())
+        self.storage_root.namespace_uri(ns)
     }
 
     /// Build the Arrow schema for a namespace's Lance table.
@@ -443,7 +453,7 @@ impl NamespaceManager {
     /// intentionally do not couple the foyer cache to the manager.
     pub async fn delete(&self, ns: &NamespaceId) -> Result<usize, FirnflowError> {
         let store = self.build_object_store()?;
-        let prefix = ObjectStorePath::from(ns.as_str());
+        let prefix = self.namespace_object_path(ns);
 
         let mut list_stream = store.list(Some(&prefix));
         let mut count: usize = 0;
@@ -464,8 +474,30 @@ impl NamespaceManager {
         Ok(count)
     }
 
+    /// Object-store-relative path of a namespace as an
+    /// [`ObjectStorePath`]. Delegates the prefix stitching to
+    /// [`StorageRoot::namespace_object_path`] so the same logic is
+    /// unit-tested without needing an `object_store` builder.
+    fn namespace_object_path(&self, ns: &NamespaceId) -> ObjectStorePath {
+        ObjectStorePath::from(self.storage_root.namespace_object_path(ns))
+    }
+
     fn build_object_store(&self) -> Result<Arc<dyn ObjectStore>, FirnflowError> {
-        let mut builder = AmazonS3Builder::from_env().with_bucket_name(&self.bucket);
+        match self.storage_root.scheme() {
+            Scheme::S3 => self.build_s3_object_store(),
+            Scheme::Gcs => Err(FirnflowError::Unsupported(
+                "GCS storage is not yet routable through NamespaceManager. \
+                 The StorageRoot parser rejects gs:// URIs at config time, \
+                 so this arm is unreachable in normal operation; if you see \
+                 this error, NamespaceManager was constructed with a Gcs \
+                 storage root by code that bypassed the parser."
+                    .into(),
+            )),
+        }
+    }
+
+    fn build_s3_object_store(&self) -> Result<Arc<dyn ObjectStore>, FirnflowError> {
+        let mut builder = AmazonS3Builder::from_env().with_bucket_name(self.storage_root.bucket());
 
         for (key, value) in &self.storage_options {
             builder = match key.as_str() {

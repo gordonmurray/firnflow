@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Context;
+use firnflow_core::StorageRoot;
 
 use crate::auth::Secret;
 use crate::rate_limit::RateLimitSettings;
@@ -23,8 +24,10 @@ use crate::rate_limit::RateLimitSettings;
 pub struct AppConfig {
     /// Address to bind the HTTP listener to.
     pub bind: SocketAddr,
-    /// S3 bucket that roots every namespace.
-    pub bucket: String,
+    /// Object-storage root that every namespace lives under.
+    /// Resolved from `FIRNFLOW_STORAGE_URI` (preferred) or the
+    /// legacy `FIRNFLOW_S3_BUCKET` (fallback).
+    pub storage_root: StorageRoot,
     /// RAM tier capacity for the foyer cache, in bytes.
     pub cache_memory_bytes: usize,
     /// Directory for the foyer NVMe-tier block file.
@@ -80,7 +83,7 @@ impl std::fmt::Debug for AppConfig {
 
         f.debug_struct("AppConfig")
             .field("bind", &self.bind)
-            .field("bucket", &self.bucket)
+            .field("storage_root", &self.storage_root)
             .field("cache_memory_bytes", &self.cache_memory_bytes)
             .field("cache_nvme_path", &self.cache_nvme_path)
             .field("cache_nvme_bytes", &self.cache_nvme_bytes)
@@ -94,14 +97,14 @@ impl std::fmt::Debug for AppConfig {
 }
 
 impl AppConfig {
-    /// Load config from the environment. Only `FIRNFLOW_S3_BUCKET`
-    /// is strictly required; everything else has a sensible default.
+    /// Load config from the environment. Either `FIRNFLOW_STORAGE_URI`
+    /// (preferred) or the legacy `FIRNFLOW_S3_BUCKET` is required;
+    /// everything else has a sensible default.
     pub fn from_env() -> anyhow::Result<Self> {
         let bind: SocketAddr = env_or("FIRNFLOW_BIND", "0.0.0.0:3000")
             .parse()
             .context("FIRNFLOW_BIND")?;
-        let bucket =
-            std::env::var("FIRNFLOW_S3_BUCKET").context("FIRNFLOW_S3_BUCKET must be set")?;
+        let storage_root = resolve_storage_root_from_env()?;
         let cache_memory_bytes: usize = env_or("FIRNFLOW_CACHE_MEMORY_BYTES", "67108864")
             .parse()
             .context("FIRNFLOW_CACHE_MEMORY_BYTES")?;
@@ -131,7 +134,7 @@ impl AppConfig {
 
         Ok(Self {
             bind,
-            bucket,
+            storage_root,
             cache_memory_bytes,
             cache_nvme_path,
             cache_nvme_bytes,
@@ -141,6 +144,117 @@ impl AppConfig {
             metrics_token,
             rate_limit,
         })
+    }
+}
+
+/// Resolve the storage root from environment variables. Thin wrapper
+/// over [`resolve_storage_root`] that reads `FIRNFLOW_STORAGE_URI`
+/// and `FIRNFLOW_S3_BUCKET` from the process environment and emits a
+/// legacy-fallback `INFO` log when only the latter is set. In normal
+/// binary startup this is called once per process, but the wrapper
+/// itself does not enforce that — callers that invoke it repeatedly
+/// will get repeat logs.
+fn resolve_storage_root_from_env() -> anyhow::Result<StorageRoot> {
+    let uri_var = std::env::var("FIRNFLOW_STORAGE_URI").ok();
+    let bucket_var = std::env::var("FIRNFLOW_S3_BUCKET").ok();
+    let outcome = resolve_storage_root(uri_var.as_deref(), bucket_var.as_deref())?;
+    if outcome.fallback_logged {
+        tracing::info!(
+            preferred = "FIRNFLOW_STORAGE_URI",
+            legacy = "FIRNFLOW_S3_BUCKET",
+            "Using FIRNFLOW_S3_BUCKET as legacy fallback. \
+             FIRNFLOW_STORAGE_URI is the preferred env var; both are supported indefinitely."
+        );
+    }
+    Ok(outcome.root)
+}
+
+/// Outcome of [`resolve_storage_root`]: the parsed [`StorageRoot`]
+/// plus a flag indicating whether the legacy `FIRNFLOW_S3_BUCKET`
+/// fallback path was taken. Callers consume the flag to decide
+/// whether to emit the preference-hint `INFO` log; the resolver
+/// itself is log-free so it can be exercised without capturing
+/// tracing output.
+#[derive(Debug, Clone)]
+pub struct ResolvedStorageRoot {
+    /// The parsed storage root.
+    pub root: StorageRoot,
+    /// True when only `FIRNFLOW_S3_BUCKET` was set and the resolver
+    /// fell back to the legacy single-bucket form. Callers translate
+    /// this into an `INFO` log pointing at the preferred env var.
+    /// Both env vars are supported indefinitely — this is a
+    /// preference hint, not a deprecation warning — so the message
+    /// is intentionally low-volume and not enforced as one-shot.
+    pub fallback_logged: bool,
+}
+
+/// Resolve a [`StorageRoot`] from raw `FIRNFLOW_STORAGE_URI` and
+/// `FIRNFLOW_S3_BUCKET` values. Pure: no environment access, no
+/// logging. Returns a [`ResolvedStorageRoot`] whose `fallback_logged`
+/// flag tells the caller whether to emit the preference-hint log.
+/// Precedence rules:
+///
+/// - `uri` only → parse it.
+/// - `bucket` only → treat as `s3://{bucket}`. `fallback_logged` is true.
+/// - Both → parse each; if the resulting [`StorageRoot`] values
+///   compare equal, use the URI version silently; if they differ,
+///   fail with both raw values in the error.
+/// - Neither → fail with a message naming both env vars.
+///
+/// The "compare equal" check uses parsed normalised structs, not raw
+/// strings, so `FIRNFLOW_STORAGE_URI=s3://foo` and
+/// `FIRNFLOW_S3_BUCKET=foo` are recognised as agreeing.
+pub fn resolve_storage_root(
+    uri: Option<&str>,
+    bucket: Option<&str>,
+) -> anyhow::Result<ResolvedStorageRoot> {
+    let uri = uri.map(str::trim).filter(|s| !s.is_empty());
+    let bucket = bucket.map(str::trim).filter(|s| !s.is_empty());
+
+    match (uri, bucket) {
+        (None, None) => Err(anyhow::anyhow!(
+            "set FIRNFLOW_STORAGE_URI=s3://bucket (or FIRNFLOW_STORAGE_URI=gs://bucket once \
+             native GCS support ships) or the legacy FIRNFLOW_S3_BUCKET=bucket"
+        )),
+        (Some(uri), None) => {
+            let root = StorageRoot::parse(uri).with_context(|| {
+                format!("FIRNFLOW_STORAGE_URI ({uri:?}) failed to parse as a storage URI")
+            })?;
+            Ok(ResolvedStorageRoot {
+                root,
+                fallback_logged: false,
+            })
+        }
+        (None, Some(bucket)) => {
+            let root = StorageRoot::s3_bucket(bucket).with_context(|| {
+                format!("FIRNFLOW_S3_BUCKET ({bucket:?}) is not a valid bucket name")
+            })?;
+            Ok(ResolvedStorageRoot {
+                root,
+                fallback_logged: true,
+            })
+        }
+        (Some(uri), Some(bucket)) => {
+            let from_uri = StorageRoot::parse(uri).with_context(|| {
+                format!("FIRNFLOW_STORAGE_URI ({uri:?}) failed to parse as a storage URI")
+            })?;
+            let from_bucket = StorageRoot::s3_bucket(bucket).with_context(|| {
+                format!("FIRNFLOW_S3_BUCKET ({bucket:?}) is not a valid bucket name")
+            })?;
+            if from_uri == from_bucket {
+                Ok(ResolvedStorageRoot {
+                    root: from_uri,
+                    fallback_logged: false,
+                })
+            } else {
+                Err(anyhow::anyhow!(
+                    "FIRNFLOW_STORAGE_URI and FIRNFLOW_S3_BUCKET disagree. \
+                     FIRNFLOW_STORAGE_URI={uri:?} parses as {from_uri:?}, but \
+                     FIRNFLOW_S3_BUCKET={bucket:?} parses as {from_bucket:?}. \
+                     Set only one, or set both to consistent values."
+                ))
+            }
+        }
     }
 }
 
@@ -242,7 +356,7 @@ mod tests {
 
         let cfg = AppConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
-            bucket: "test".into(),
+            storage_root: StorageRoot::s3_bucket("test").unwrap(),
             cache_memory_bytes: 0,
             cache_nvme_path: std::env::temp_dir(),
             cache_nvme_bytes: 0,

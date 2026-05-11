@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 
 use firnflow_core::metrics::test_metrics;
-use firnflow_core::{NamespaceId, NamespaceManager, UpsertRow};
+use firnflow_core::{NamespaceId, NamespaceManager, StorageRoot, UpsertRow};
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -62,7 +62,11 @@ fn unit_vector(dim: usize, axis: usize) -> Vec<f32> {
 #[ignore]
 async fn three_namespaces_with_different_dims() {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
-    let manager = NamespaceManager::new(bucket, minio_options(), test_metrics());
+    let manager = NamespaceManager::new(
+        StorageRoot::s3_bucket(&bucket).unwrap(),
+        minio_options(),
+        test_metrics(),
+    );
 
     let ns4 = NamespaceId::new(unique_namespace("multi-dim-4")).unwrap();
     let ns8 = NamespaceId::new(unique_namespace("multi-dim-8")).unwrap();
@@ -172,7 +176,11 @@ async fn three_namespaces_with_different_dims() {
 #[ignore]
 async fn first_upsert_infers_dim_and_validates_remaining_rows() {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
-    let manager = NamespaceManager::new(bucket, minio_options(), test_metrics());
+    let manager = NamespaceManager::new(
+        StorageRoot::s3_bucket(&bucket).unwrap(),
+        minio_options(),
+        test_metrics(),
+    );
     let ns = NamespaceId::new(unique_namespace("dim-inference")).unwrap();
 
     // Row 0 has dim=4, row 1 has dim=6 — must fail with a clear error.
