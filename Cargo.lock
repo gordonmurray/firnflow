@@ -2420,7 +2420,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "firnflow-api"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "firnflow-bench"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "firnflow-core",
@@ -2449,7 +2449,7 @@ dependencies = [
 
 [[package]]
 name = "firnflow-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
