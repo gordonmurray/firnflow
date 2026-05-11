@@ -49,18 +49,18 @@
     <p class="subtitle">How Firn turns cheap object storage into a fast, multi-tenant search engine.</p>
 
     <h2>Tiered storage</h2>
-    <p>Firn's core idea is a three-tier storage hierarchy. Data lives permanently on S3, but queries are served from the fastest available tier:</p>
+    <p>Firn's core idea is a three-tier storage hierarchy. Data lives permanently in the configured object store, but queries are served from the fastest available tier:</p>
 
     <table>
       <thead><tr><th>Tier</th><th>Backed by</th><th>Latency</th><th>Role</th></tr></thead>
       <tbody>
         <tr><td><strong>L1: RAM</strong></td><td>foyer in-memory cache</td><td>sub-microsecond</td><td>Hottest queries, configurable size</td></tr>
         <tr><td><strong>L2: NVMe</strong></td><td>foyer disk cache</td><td>microseconds</td><td>Overflow from RAM tier, larger capacity</td></tr>
-        <tr><td><strong>L3: Object storage</strong></td><td>LanceDB on S3/MinIO/R2</td><td>milliseconds to seconds</td><td>Source of truth, unlimited capacity, near-zero idle cost</td></tr>
+        <tr><td><strong>L3: Object storage</strong></td><td>LanceDB on AWS S3 / MinIO / R2 / Tigris / Spaces / native GCS</td><td>milliseconds to seconds</td><td>Source of truth, unlimited capacity, near-zero idle cost</td></tr>
       </tbody>
     </table>
 
-    <p>The cache stores complete, serialised query result sets. When a query hits the cache, zero bytes are read from S3. When it misses, the result is fetched from S3 and stored in the cache for future use.</p>
+    <p>The cache stores complete, serialised query result sets. When a query hits the cache, zero bytes are read from object storage. When it misses, the result is fetched from the backend and stored in the cache for future use.</p>
 
     <h2>Request middleware</h2>
     <p>Every protected endpoint runs through a fixed middleware stack before the handler. The stack is wired up in <code>firnflow_api::router</code> and the order is load-bearing — bucketing on a validated <code>Principal</code> rather than an attacker-supplied header is the whole reason auth runs first.</p>
@@ -90,18 +90,18 @@ handler</code></pre>
       <li><strong>Hash the query.</strong> The full <code>QueryRequest</code> (vector, k, nprobes, text) is serialised with bincode and hashed with xxh3 to produce a deterministic <code>QueryHash</code>.</li>
       <li><strong>Build the cache key.</strong> The key is a tuple of <code>(namespace, generation, query_hash)</code>. The generation counter ensures stale results are never returned after a write.</li>
       <li><strong>Check foyer.</strong> The HybridCache checks RAM first, then NVMe. On a hit, the serialised result is returned and a <code>cache_hits_total</code> metric is recorded.</li>
-      <li><strong>On miss: query S3.</strong> LanceDB runs the query against the Lance table on S3 (vector nearest-neighbour, BM25 FTS, or hybrid) using the namespace's pooled <code>Connection</code> and <code>Table</code> handle &mdash; the first request for a namespace opens and caches the handle, every subsequent request skips the credential-resolution and manifest-read round-trips. The result is serialised with bincode and stored in foyer. A <code>cache_misses_total</code> and <code>s3_requests_total</code> metric are recorded.</li>
+      <li><strong>On miss: query object storage.</strong> LanceDB runs the query against the Lance table on the configured backend (vector nearest-neighbour, BM25 FTS, or hybrid) using the namespace's pooled <code>Connection</code> and <code>Table</code> handle &mdash; the first request for a namespace opens and caches the handle, every subsequent request skips the credential-resolution and manifest-read round-trips. The result is serialised with bincode and stored in foyer. A <code>cache_misses_total</code> and <code>s3_requests_total</code> metric are recorded. (The metric name predates native GCS support; it now counts object-store operations regardless of backend.)</li>
       <li><strong>Return the result.</strong> The query duration (cache hit or miss) is recorded in the <code>query_duration_seconds</code> histogram.</li>
     </ol>
 
     <h2>Write path</h2>
     <p>Writes follow a strict ordering to prevent stale cache state:</p>
     <ol>
-      <li><strong>Append to S3.</strong> Rows are appended to the namespace's Lance table via LanceDB's native append API.</li>
-      <li><strong>Invalidate the cache.</strong> Only after the S3 write succeeds, the namespace's generation counter is atomically incremented. This makes all previously cached entries for that namespace unreachable by key.</li>
+      <li><strong>Append to object storage.</strong> Rows are appended to the namespace's Lance table via LanceDB's native append API.</li>
+      <li><strong>Invalidate the cache.</strong> Only after the write to the backend succeeds, the namespace's generation counter is atomically incremented. This makes all previously cached entries for that namespace unreachable by key.</li>
       <li><strong>Record metrics.</strong> <code>write_duration_seconds</code> and <code>s3_requests_total{operation=upsert}</code> are updated.</li>
     </ol>
-    <p>The "invalidate after confirmed write" ordering is critical: if the S3 write fails, the cache is left untouched with valid data. There is no window where the cache is empty and queries would storm S3.</p>
+    <p>The "invalidate after confirmed write" ordering is critical: if the upstream write fails, the cache is left untouched with valid data. There is no window where the cache is empty and queries would storm the backend.</p>
 
     <h2>Cache invalidation</h2>
     <p>Firn uses a <strong>generation counter</strong> strategy for cache invalidation. This was chosen after evaluating several alternatives.</p>
@@ -127,7 +127,7 @@ handler</code></pre>
     </table>
 
     <h2>Connection pool</h2>
-    <p>The namespace manager caches a <code>lancedb::Connection</code> and <code>Table</code> handle per namespace after the first open. Without the pool, every upsert and every cache-miss query would re-run S3 credential resolution and re-read the Lance table manifest from S3; with the pool, those costs are paid once per namespace per process lifetime.</p>
+    <p>The namespace manager caches a <code>lancedb::Connection</code> and <code>Table</code> handle per namespace after the first open. Without the pool, every upsert and every cache-miss query would re-run credential resolution (AWS chain or Google service-account JSON, depending on backend) and re-read the Lance table manifest; with the pool, those costs are paid once per namespace per process lifetime.</p>
 
     <p>The pool is invalidated on operations that change the table's manifest or remove its data:</p>
     <ul>
@@ -142,10 +142,10 @@ handler</code></pre>
     <h2>Namespace isolation</h2>
     <p>Each namespace is a fully isolated unit:</p>
     <ul>
-      <li><strong>S3 prefix:</strong> <code>s3://bucket/namespace/</code> - no data sharing between namespaces</li>
+      <li><strong>Namespace root:</strong> <code>{FIRNFLOW_STORAGE_URI}/{namespace}/</code> &mdash; e.g. <code>s3://my-bucket/docs/</code> or <code>gs://my-bucket/tenants/acme/docs/</code>. No data sharing between namespaces.</li>
       <li><strong>Vector dimension:</strong> inferred from the first upsert; subsequent upserts to the same namespace must match</li>
       <li><strong>Cache:</strong> one shared foyer instance, but keys are scoped by namespace</li>
-      <li><strong>Lifecycle:</strong> lazy creation (no S3 objects until the first write), full cleanup on delete</li>
+      <li><strong>Lifecycle:</strong> lazy creation (no objects in the backend until the first write), full cleanup on delete</li>
     </ul>
     <p>Cross-namespace queries are not supported and return a <code>400</code> error.</p>
 
@@ -190,7 +190,7 @@ handler</code></pre>
     </ul>
 
     <h2>Compaction</h2>
-    <p>Each upsert creates a new Lance data fragment on S3. After many small upserts, the namespace accumulates many small files, which increases cold query latency (more S3 GET requests per scan). Compaction merges these fragments into fewer, larger files.</p>
+    <p>Each upsert creates a new Lance data fragment in the backing object store. After many small upserts, the namespace accumulates many small files, which increases cold query latency (more GET requests per scan). Compaction merges these fragments into fewer, larger files.</p>
     <ul>
       <li>Triggered explicitly via <code>POST /ns/{ns}/compact</code></li>
       <li>Runs in the background (returns 202)</li>
@@ -199,7 +199,7 @@ handler</code></pre>
     </ul>
 
     <h2>Concurrency</h2>
-    <p>Firn relies on LanceDB's native concurrency model, which uses S3 conditional writes (<code>If-None-Match: *</code>) to prevent conflicts between concurrent writers. This has been stress-tested with multiple simultaneous writers on both MinIO and AWS S3, with 100 runs each showing zero row count discrepancies.</p>
+    <p>Firn relies on LanceDB's native concurrency model, which uses the backend's conditional-write primitive to serialise commits between concurrent writers. For S3-family backends that is <code>If-None-Match: *</code>; for native Google Cloud Storage it is the generation precondition (<code>x-goog-if-generation-match: 0</code> on the GCS XML API), which lancedb's <code>gcs</code> feature routes through transparently. Both paths are stress-tested with 100 consecutive runs of an 8-writer × 100-row contention test against real buckets (AWS S3, MinIO, R2, Tigris, Spaces, and native GCS), each showing zero row-count discrepancies. The GCS S3-interop endpoint is a separate path that silently drops <code>If-None-Match: *</code> and is not supported.</p>
 
     <div class="callout callout-info">
       <div class="callout-title">Single-node design</div>

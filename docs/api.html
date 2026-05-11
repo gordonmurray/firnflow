@@ -67,7 +67,7 @@
     </div>
 
     <h2>Namespaces</h2>
-    <p>Every data operation is scoped to a namespace. Namespace names must be lowercase alphanumeric with hyphens, and no longer than 64 characters. Each namespace maps to an isolated S3 prefix <code>s3://bucket/namespace/</code>.</p>
+    <p>Every data operation is scoped to a namespace. Namespace names must be lowercase alphanumeric with hyphens, and no longer than 64 characters. Each namespace maps to an isolated object-storage prefix under the configured <code>FIRNFLOW_STORAGE_URI</code> &mdash; for example <code>s3://bucket/namespace/</code> or <code>gs://bucket/tenants/acme/namespace/</code>.</p>
     <p>Valid: <code>my-project</code>, <code>embeddings-v2</code>, <code>prod-search</code>.<br>
     Invalid: <code>My_Project</code> (uppercase and underscores), <code>a-very-long-name-that-exceeds-the-sixty-four-character-limit-imposed-by-firn</code>.</p>
 
@@ -146,7 +146,7 @@
         <h4>Errors</h4>
         <ul>
           <li><code>400</code> - invalid namespace name or vector dimension mismatch</li>
-          <li><code>500</code> - S3 write failure (client gets generic error; full details logged server-side)</li>
+          <li><code>500</code> - object-storage write failure (client gets generic error; full details logged server-side)</li>
         </ul>
       </div>
     </div>
@@ -159,7 +159,7 @@
         <span class="endpoint-desc">Vector, full-text, or hybrid search</span>
       </div>
       <div class="endpoint-body">
-        <p>Queries the namespace through the cache-aside path. On a cache hit, the result is returned from RAM or NVMe with zero S3 access. On a miss, the query runs against S3 via LanceDB and the result is cached.</p>
+        <p>Queries the namespace through the cache-aside path. On a cache hit, the result is returned from RAM or NVMe with zero object-storage access. On a miss, the query runs against the configured backend via LanceDB and the result is cached.</p>
 
         <h4>Query modes</h4>
         <p>The query mode is determined by which fields are present:</p>
@@ -282,13 +282,13 @@
         <span class="endpoint-desc">Delete a namespace and all its data</span>
       </div>
       <div class="endpoint-body">
-        <p>Removes every S3 object under the namespace's prefix and evicts all cached query results. This is irreversible.</p>
+        <p>Removes every object under the namespace's prefix and evicts all cached query results. This is irreversible.</p>
 
         <h4>Response (200)</h4>
         <table>
           <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
           <tbody>
-            <tr><td><code>objects_deleted</code></td><td>integer</td><td>Number of S3 objects removed</td></tr>
+            <tr><td><code>objects_deleted</code></td><td>integer</td><td>Number of objects removed from the backend</td></tr>
           </tbody>
         </table>
 
@@ -437,7 +437,7 @@
         <span class="endpoint-desc">Compact data files (async)</span>
       </div>
       <div class="endpoint-body">
-        <p>Merges small Lance data fragments into fewer, larger files to reduce S3 round-trips on cold queries. Returns <code>202 Accepted</code>. Also invalidates the cache for this namespace, since file offsets change after compaction.</p>
+        <p>Merges small Lance data fragments into fewer, larger files to reduce object-storage round-trips on cold queries. Returns <code>202 Accepted</code>. Also invalidates the cache for this namespace, since file offsets change after compaction.</p>
 
         <h4>Request body</h4>
         <p>No request body required.</p>
@@ -483,7 +483,7 @@
         </tr>
         <tr>
           <td><code>500</code></td>
-          <td>S3 connectivity, cache failure, or internal error</td>
+          <td>Object-storage connectivity, cache failure, or internal error</td>
           <td><code>{"error": "internal error"}</code></td>
         </tr>
       </tbody>

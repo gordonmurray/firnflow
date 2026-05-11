@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Configuration - Firn</title>
-  <meta name="description" content="All environment variables for configuring Firn: S3 backends, cache sizing, bind address, and logging.">
+  <meta name="description" content="All environment variables for configuring Firn: object-storage backends (S3-family and native GCS), cache sizing, bind address, and logging.">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -46,7 +46,7 @@
 
   <main class="content">
     <h1>Configuration</h1>
-    <p class="subtitle">Firn is configured entirely through environment variables. Only <code>FIRNFLOW_S3_BUCKET</code> is required; everything else has a sensible default.</p>
+    <p class="subtitle">Firn is configured entirely through environment variables. Either <code>FIRNFLOW_STORAGE_URI</code> (preferred) or the legacy <code>FIRNFLOW_S3_BUCKET</code> is required; everything else has a sensible default.</p>
 
     <h2>Core settings</h2>
 
@@ -54,9 +54,14 @@
       <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
       <tbody>
         <tr>
+          <td><code>FIRNFLOW_STORAGE_URI</code></td>
+          <td><em>required (or set <code>FIRNFLOW_S3_BUCKET</code>)</em></td>
+          <td>Object-storage root that every namespace lives under. Accepts a URI of the form <code>scheme://bucket[/prefix...]</code> where scheme is <code>s3</code> (any S3-compatible backend) or <code>gs</code> (native Google Cloud Storage). Namespace tables live at <code>{root}/{namespace}/</code>. Multi-segment prefixes are supported, e.g. <code>s3://shared-bucket/tenants/acme/prod</code> or <code>gs://shared-bucket/tenants/acme/prod</code>.</td>
+        </tr>
+        <tr>
           <td><code>FIRNFLOW_S3_BUCKET</code></td>
-          <td><em>required</em></td>
-          <td>S3 bucket that roots every namespace. Each namespace creates its data under <code>s3://bucket/namespace/</code>.</td>
+          <td><em>legacy fallback</em></td>
+          <td>Legacy S3-only form. Equivalent to <code>FIRNFLOW_STORAGE_URI=s3://&lt;bucket&gt;</code>. Both vars remain supported; if both are set they must agree, or startup fails.</td>
         </tr>
         <tr>
           <td><code>FIRNFLOW_BIND</code></td>
@@ -71,8 +76,11 @@
       </tbody>
     </table>
 
-    <h2>S3 storage backend</h2>
-    <p>These variables control which S3-compatible backend Firn connects to. For real AWS S3, you typically only need <code>FIRNFLOW_S3_BUCKET</code> and <code>FIRNFLOW_S3_REGION</code>. Credentials come from the standard AWS chain (instance profile, environment, <code>~/.aws/credentials</code>).</p>
+    <h2>Object storage backend</h2>
+    <p>For S3-family backends, the <code>FIRNFLOW_S3_*</code> variables below configure the endpoint and credentials. For native Google Cloud Storage, set <code>FIRNFLOW_STORAGE_URI=gs://&lt;bucket&gt;</code> and one of the standard <code>GOOGLE_*</code> credential variables — no other firnflow-specific configuration is required.</p>
+
+    <h3>S3-family variables</h3>
+    <p>For real AWS S3, you typically only need <code>FIRNFLOW_STORAGE_URI</code> and <code>FIRNFLOW_S3_REGION</code>. Credentials come from the standard AWS chain (instance profile, environment, <code>~/.aws/credentials</code>).</p>
 
     <table>
       <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
@@ -80,7 +88,7 @@
         <tr>
           <td><code>FIRNFLOW_S3_ENDPOINT</code></td>
           <td><em>unset (use AWS)</em></td>
-          <td>Custom S3 endpoint URL. Set this for MinIO, R2, GCS, or any S3-compatible backend. When set, path-style addressing and plain HTTP are automatically enabled.</td>
+          <td>Custom S3 endpoint URL. Set this for MinIO, R2, Tigris, DigitalOcean Spaces, or any S3-compatible backend. When set, path-style addressing and plain HTTP are automatically enabled. Not used for native GCS — set <code>FIRNFLOW_STORAGE_URI=gs://...</code> instead.</td>
         </tr>
         <tr>
           <td><code>FIRNFLOW_S3_ACCESS_KEY</code></td>
@@ -95,33 +103,76 @@
         <tr>
           <td><code>FIRNFLOW_S3_REGION</code></td>
           <td><code>us-east-1</code></td>
-          <td>AWS region for the bucket.</td>
+          <td>Region for the bucket. Some S3-compatible providers (R2, Tigris) accept <code>auto</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Google Cloud Storage variables</h3>
+    <p>Native GCS routing uses lancedb's <code>gcs</code> feature and the matching <code>object_store::gcp</code> client. Both authenticate from the standard Google environment variables; firnflow forwards them unmodified.</p>
+
+    <table>
+      <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>GOOGLE_APPLICATION_CREDENTIALS</code></td>
+          <td><em>unset</em></td>
+          <td>Path to an application-default-credentials file. May resolve to a service-account JSON, federated identity, or user creds.</td>
+        </tr>
+        <tr>
+          <td><code>GOOGLE_SERVICE_ACCOUNT_PATH</code></td>
+          <td><em>unset</em></td>
+          <td>Path to a service-account JSON file. Strictly service-account format only — distinct from <code>GOOGLE_APPLICATION_CREDENTIALS</code>.</td>
+        </tr>
+        <tr>
+          <td><code>GOOGLE_SERVICE_ACCOUNT_KEY</code></td>
+          <td><em>unset</em></td>
+          <td>Inline service-account JSON, as a single string. Useful for environments where mounting a file is awkward (some serverless platforms). Redacted from <code>Debug</code> output.</td>
         </tr>
       </tbody>
     </table>
 
     <h3>AWS S3</h3>
     <p>For production AWS deployments, let the standard credential chain handle authentication (instance profiles, ECS task roles, or <code>~/.aws/credentials</code>).</p>
-    <pre><code>FIRNFLOW_S3_BUCKET=my-firn-bucket
+    <pre><code>FIRNFLOW_STORAGE_URI=s3://my-firn-bucket
 FIRNFLOW_S3_REGION=eu-west-1</code></pre>
 
     <h3>MinIO</h3>
-    <pre><code>FIRNFLOW_S3_BUCKET=firnflow
+    <pre><code>FIRNFLOW_STORAGE_URI=s3://firnflow
 FIRNFLOW_S3_ENDPOINT=http://localhost:9000
 FIRNFLOW_S3_ACCESS_KEY=minioadmin
 FIRNFLOW_S3_SECRET_KEY=minioadmin</code></pre>
 
     <h3>Cloudflare R2</h3>
     <p>R2 provides an S3-compatible API. Use your R2 endpoint and API tokens.</p>
-    <pre><code>FIRNFLOW_S3_BUCKET=firn-r2
+    <pre><code>FIRNFLOW_STORAGE_URI=s3://firn-r2
 FIRNFLOW_S3_ENDPOINT=https://&lt;account-id&gt;.r2.cloudflarestorage.com
 FIRNFLOW_S3_ACCESS_KEY=&lt;r2-access-key&gt;
 FIRNFLOW_S3_SECRET_KEY=&lt;r2-secret-key&gt;
 FIRNFLOW_S3_REGION=auto</code></pre>
 
-    <div class="callout callout-warning">
+    <h3>Tigris</h3>
+    <pre><code>FIRNFLOW_STORAGE_URI=s3://firn-tigris
+FIRNFLOW_S3_ENDPOINT=https://t3.storage.dev
+FIRNFLOW_S3_ACCESS_KEY=&lt;tigris-access-key&gt;
+FIRNFLOW_S3_SECRET_KEY=&lt;tigris-secret-key&gt;
+FIRNFLOW_S3_REGION=auto</code></pre>
+
+    <h3>DigitalOcean Spaces</h3>
+    <pre><code>FIRNFLOW_STORAGE_URI=s3://firn-spaces
+FIRNFLOW_S3_ENDPOINT=https://&lt;region&gt;.digitaloceanspaces.com
+FIRNFLOW_S3_ACCESS_KEY=&lt;spaces-access-key&gt;
+FIRNFLOW_S3_SECRET_KEY=&lt;spaces-secret-key&gt;
+FIRNFLOW_S3_REGION=&lt;region&gt;</code></pre>
+
+    <h3>Google Cloud Storage (native)</h3>
+    <p>Use the <code>gs://</code> scheme. The GCS S3-interop endpoint is a separate path that silently drops <code>If-None-Match: *</code> and is not supported — do not reach for it.</p>
+    <pre><code>FIRNFLOW_STORAGE_URI=gs://my-firn-bucket
+GOOGLE_APPLICATION_CREDENTIALS=/etc/firnflow/gcp-sa.json</code></pre>
+
+    <div class="callout callout-info">
       <div class="callout-title">Provider validation</div>
-      Firn has been validated against <strong>MinIO</strong> and <strong>AWS S3</strong> with concurrent writer stress tests. R2 and GCS are expected to work but have not been formally validated. See the <a href="https://github.com/gordonmurray/firnflow/blob/main/docs/provider-support.md">provider support matrix</a> for details.
+      Firn is validated against <strong>AWS S3</strong>, <strong>MinIO</strong>, <strong>Cloudflare R2</strong>, <strong>Tigris</strong>, <strong>DigitalOcean Spaces</strong>, and <strong>native Google Cloud Storage</strong> with 100-run concurrent-writer stress tests. <strong>Backblaze B2</strong> and the GCS S3-interop endpoint are not supported. See the compatibility matrix in the <a href="https://github.com/gordonmurray/firnflow#storage-backends">project README</a> for the per-provider details.
     </div>
 
     <h2>Cache settings</h2>
@@ -143,7 +194,7 @@ FIRNFLOW_S3_REGION=auto</code></pre>
         <tr>
           <td><code>FIRNFLOW_CACHE_NVME_BYTES</code></td>
           <td><code>268435456</code> (256 MB)</td>
-          <td>NVMe tier capacity in bytes. This is the L2 cache; hits here avoid S3 but are slower than RAM.</td>
+          <td>NVMe tier capacity in bytes. This is the L2 cache; hits here avoid the object-storage round-trip but are slower than RAM.</td>
         </tr>
       </tbody>
     </table>
@@ -162,7 +213,7 @@ FIRNFLOW_S3_REGION=auto</code></pre>
 
     <div class="callout callout-info">
       <div class="callout-title">Cache is ephemeral</div>
-      The cache is a performance optimisation, not durable storage. Data on S3 is always the source of truth. If the cache is lost (restart, crash, disk failure), Firn repopulates it transparently on the next query.
+      The cache is a performance optimisation, not durable storage. Data in the configured object store is always the source of truth. If the cache is lost (restart, crash, disk failure), Firn repopulates it transparently on the next query.
     </div>
 
     <h2>Authentication</h2>
@@ -244,7 +295,7 @@ services:
     <h2>Full example</h2>
     <p>A complete production configuration against AWS S3:</p>
     <pre><code># Production environment
-FIRNFLOW_S3_BUCKET=prod-firn-vectors
+FIRNFLOW_STORAGE_URI=s3://prod-firn-vectors
 FIRNFLOW_S3_REGION=eu-west-1
 FIRNFLOW_BIND=0.0.0.0:3000
 FIRNFLOW_CACHE_MEMORY_BYTES=268435456

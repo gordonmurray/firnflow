@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Firn - Multi-tenant vector search on object storage</title>
-  <meta name="description" content="High-performance multi-tenant vector and full-text search engine backed by S3. Open-source alternative to turbopuffer built with LanceDB and foyer.">
+  <meta name="description" content="High-performance multi-tenant vector and full-text search engine backed by object storage (AWS S3, MinIO, R2, Tigris, Spaces, native GCS). Open-source alternative to turbopuffer built with LanceDB and foyer.">
   <link rel="stylesheet" href="style.css">
 </head>
 <body class="page-home">
@@ -28,7 +28,7 @@
     <div class="hero">
       <h1>Vector search on object storage</h1>
       <p class="subtitle">
-        A multi-tenant search engine that pairs LanceDB with a tiered RAM + NVMe cache. Every namespace lives on S3 with near-zero idle cost. Every cache hit costs zero S3 requests.
+        A multi-tenant search engine that pairs LanceDB with a tiered RAM + NVMe cache. Every namespace lives on cheap object storage (AWS S3, MinIO, R2, Tigris, DigitalOcean Spaces, or native Google Cloud Storage) with near-zero idle cost. Every cache hit costs zero backend requests.
       </p>
       <div class="hero-actions">
         <a href="quickstart.html" class="btn btn-primary">Get started</a>
@@ -47,7 +47,7 @@
       </div>
       <div class="stat">
         <div class="value">0</div>
-        <div class="label">S3 requests per cache hit</div>
+        <div class="label">Object-storage requests per cache hit</div>
       </div>
       <div class="stat">
         <div class="value">3</div>
@@ -57,10 +57,10 @@
 
     <h2>How it works</h2>
     <p>
-      Firn stores every namespace under its own S3 prefix using <strong>LanceDB</strong> as the storage engine. A tiered cache powered by <strong>foyer</strong> sits in front of S3, serving repeated queries from RAM or NVMe in microseconds instead of milliseconds. Writes automatically invalidate the cache for the affected namespace using an O(1) generation counter strategy.
+      Firn stores every namespace under its own object-storage prefix using <strong>LanceDB</strong> as the storage engine. A tiered cache powered by <strong>foyer</strong> sits in front of the backend, serving repeated queries from RAM or NVMe in microseconds instead of milliseconds. Writes automatically invalidate the cache for the affected namespace using an O(1) generation counter strategy.
     </p>
     <p>
-      The result: your data lives cheaply on S3, but hot queries feel local. The <code>/metrics</code> endpoint shows exactly how many S3 requests the cache is saving you.
+      The result: your data lives cheaply on object storage, but hot queries feel local. The <code>/metrics</code> endpoint shows exactly how many backend requests the cache is saving you.
     </p>
     <p>
       Production hardening, new in 0.5.0: optional bearer-token authentication with a read/write and admin scope split, optional <code>tower-governor</code> rate limiting keyed on the validated principal, and an opt-in <code>/metrics</code> token. See <a href="configuration.html#authentication">configuration</a> and <a href="deployment.html#authentication-and-rate-limiting">deployment</a>.
@@ -79,7 +79,7 @@
       </a>
       <a href="configuration.html" class="card" style="text-decoration:none;color:inherit">
         <h3>Configuration</h3>
-        <p>Environment variables for S3 backends, cache sizing, bind address, and logging.</p>
+        <p>Environment variables for object-storage backends (S3-family and native GCS), cache sizing, bind address, and logging.</p>
       </a>
       <a href="architecture.html" class="card" style="text-decoration:none;color:inherit">
         <h3>Architecture</h3>
@@ -87,7 +87,7 @@
       </a>
       <a href="deployment.html" class="card" style="text-decoration:none;color:inherit">
         <h3>Deployment</h3>
-        <p>Run locally with Docker Compose, deploy to production with the multi-stage Dockerfile, or connect to AWS, MinIO, or R2.</p>
+        <p>Run locally with Docker Compose, deploy to production with the multi-stage Dockerfile, against AWS S3, MinIO, Cloudflare R2, Tigris, DigitalOcean Spaces, or native Google Cloud Storage.</p>
       </a>
       <a href="monitoring.html" class="card" style="text-decoration:none;color:inherit">
         <h3>Monitoring</h3>
@@ -111,7 +111,7 @@
     </table>
 
     <p>
-      Without an index, each cache miss costs <strong>25 seconds</strong>. With IVF_PQ, that drops to under 1 second. The cache eliminates S3 entirely for repeated queries, bringing latency to microseconds regardless of index type.
+      Without an index, each cache miss costs <strong>25 seconds</strong>. With IVF_PQ, that drops to under 1 second. The cache eliminates the backend round-trip entirely for repeated queries, bringing latency to microseconds regardless of index type.
     </p>
 
     <h2>Key technologies</h2>
@@ -119,7 +119,7 @@
       <li><strong>LanceDB</strong> - vector and BM25 search engine that runs natively on object storage.</li>
       <li><strong>foyer</strong> - hybrid cache (RAM + NVMe) with LFU/LRU eviction policies.</li>
       <li><strong>axum</strong> - async Rust HTTP framework.</li>
-      <li><strong>Prometheus</strong> - native metrics for cache hits, misses, and S3 cost savings.</li>
+      <li><strong>Prometheus</strong> - native metrics for cache hits, misses, and object-storage cost savings.</li>
     </ul>
 
   </main>
