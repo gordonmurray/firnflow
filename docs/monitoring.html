@@ -46,7 +46,7 @@
 
   <main class="content">
     <h1>Monitoring</h1>
-    <p class="subtitle">Firn exposes Prometheus metrics at <code>GET /metrics</code> that give full visibility into cache effectiveness and S3 cost savings.</p>
+    <p class="subtitle">Firn exposes Prometheus metrics at <code>GET /metrics</code> that give full visibility into cache effectiveness and object-storage cost savings.</p>
 
     <h2>Scrape configuration</h2>
     <p>Add Firn to your Prometheus scrape targets:</p>
@@ -76,13 +76,13 @@ scrape_configs:
           <td><code>firnflow_cache_hits_total</code></td>
           <td>Counter</td>
           <td><code>namespace</code></td>
-          <td>Total cache hits. Each hit means the result was served from RAM or NVMe with zero S3 access.</td>
+          <td>Total cache hits. Each hit means the result was served from RAM or NVMe with zero object-storage access.</td>
         </tr>
         <tr>
           <td><code>firnflow_cache_misses_total</code></td>
           <td>Counter</td>
           <td><code>namespace</code></td>
-          <td>Total cache misses. Each miss triggered a query to S3 via LanceDB and populated the cache.</td>
+          <td>Total cache misses. Each miss triggered a query to the configured backend via LanceDB and populated the cache.</td>
         </tr>
       </tbody>
     </table>
@@ -126,7 +126,7 @@ scrape_configs:
           <td><code>firnflow_s3_requests_total</code></td>
           <td>Counter</td>
           <td><code>namespace</code>, <code>operation</code></td>
-          <td>Number of Firn-initiated operations that hit S3. Operations: <code>query</code> (cache miss), <code>upsert</code>, <code>delete</code>. This is the primary signal for whether the cache is saving you S3 costs.</td>
+          <td>Number of Firn-initiated operations that hit the configured object-storage backend. Operations: <code>query</code> (cache miss), <code>upsert</code>, <code>delete</code>. This is the primary signal for whether the cache is saving you backend request costs. The metric name predates native GCS support and counts requests against any backend (S3-family or native GCS); it is kept as <code>s3_requests_total</code> for dashboard continuity.</td>
         </tr>
         <tr>
           <td><code>firnflow_active_namespaces</code></td>
@@ -145,7 +145,7 @@ scrape_configs:
 
     <div class="callout callout-info">
       <div class="callout-title">The key metric</div>
-      <code>firnflow_s3_requests_total</code> is the metric that proves the cache is working. Compare <code>s3_requests_total{operation="query"}</code> against <code>cache_misses_total</code>; they should be equal. The difference between total queries and cache misses is how many S3 requests the cache has eliminated.
+      <code>firnflow_s3_requests_total</code> is the metric that proves the cache is working. Compare <code>s3_requests_total{operation="query"}</code> against <code>cache_misses_total</code>; they should be equal. The difference between total queries and cache misses is how many object-storage requests the cache has eliminated. (The metric name is historical and kept stable for dashboard continuity; it counts requests against any configured backend.)
     </div>
 
     <h3>Auth and rate-limit metrics</h3>
@@ -173,7 +173,7 @@ scrape_configs:
     <h2>PromQL examples</h2>
 
     <h3>Cache hit rate (per namespace)</h3>
-    <p>The fraction of queries served from cache without touching S3:</p>
+    <p>The fraction of queries served from cache without touching the backend:</p>
     <pre><code>firnflow_cache_hits_total{namespace="production"}
 /
 (firnflow_cache_hits_total{namespace="production"} + firnflow_cache_misses_total{namespace="production"})</code></pre>
@@ -190,18 +190,18 @@ histogram_quantile(0.50, rate(firnflow_query_duration_seconds_bucket[5m]))
 # p99
 histogram_quantile(0.99, rate(firnflow_query_duration_seconds_bucket[5m]))</code></pre>
 
-    <h3>S3 request rate (per namespace)</h3>
+    <h3>Object-storage request rate (per namespace)</h3>
     <pre><code>rate(firnflow_s3_requests_total{namespace="production"}[5m])</code></pre>
 
-    <h3>S3 requests saved (total avoided queries)</h3>
+    <h3>Object-storage requests saved (total avoided queries)</h3>
     <pre><code>sum(firnflow_cache_hits_total)</code></pre>
-    <p>Each cache hit is one S3 request that did not happen.</p>
+    <p>Each cache hit is one object-storage request that did not happen.</p>
 
     <h3>Write throughput</h3>
     <pre><code>rate(firnflow_s3_requests_total{operation="upsert"}[5m])</code></pre>
 
     <h3>Namespaces paying cold-open cost</h3>
-    <p>Active namespaces without a pooled connection handle. The first request to any of these will re-run the S3 credential resolution and manifest read:</p>
+    <p>Active namespaces without a pooled connection handle. The first request to any of these will re-run credential resolution and re-read the Lance table manifest:</p>
     <pre><code>firnflow_active_namespaces - firnflow_cached_handles</code></pre>
 
     <h2>Alerting rules</h2>
@@ -243,10 +243,12 @@ groups:
           summary: "Firn query latency p99 above 1 second"
           description: >
             High query latency suggests frequent cache misses
-            hitting S3. Consider increasing cache size, building an
-            index, or warming the cache.
+            hitting the object-storage backend. Consider increasing cache
+            size, building an index, or warming the cache.
 
-      # S3 request rate spike (unexpected backend load)
+      # Object-storage request rate spike (unexpected backend load).
+      # Alert rule name kept as FirnHighS3RequestRate for dashboard
+      # continuity; the metric is backend-agnostic.
       - alert: FirnHighS3RequestRate
         expr: |
           sum(rate(firnflow_s3_requests_total{operation="query"}[5m])) > 10
@@ -254,11 +256,11 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Firn S3 query request rate above 10/s"
+          summary: "Firn object-storage query request rate above 10/s"
           description: >
             The cache is not absorbing enough queries. This increases
-            S3 costs and latency. Check if the working set has
-            changed or if write-heavy invalidation is the cause.</code></pre>
+            object-storage costs and latency. Check if the working set
+            has changed or if write-heavy invalidation is the cause.</code></pre>
 
     <h2>Grafana dashboard</h2>
     <p>A minimal Grafana dashboard for Firn should include these panels:</p>
@@ -277,12 +279,12 @@ groups:
           <td><code>histogram_quantile(0.50, rate(query_duration_seconds_bucket[5m]))</code></td>
         </tr>
         <tr>
-          <td>S3 requests/sec by operation</td>
+          <td>Object-storage requests/sec by operation</td>
           <td>Time series</td>
           <td><code>rate(s3_requests_total[5m])</code> grouped by <code>operation</code></td>
         </tr>
         <tr>
-          <td>S3 requests saved (counter)</td>
+          <td>Object-storage requests saved (counter)</td>
           <td>Stat</td>
           <td><code>sum(cache_hits_total)</code></td>
         </tr>
@@ -321,9 +323,9 @@ groups:
     <h3>Warning signals</h3>
     <ul>
       <li><strong>Falling cache hit rate:</strong> the working set may exceed cache capacity. Increase <code>FIRNFLOW_CACHE_MEMORY_BYTES</code> or <code>FIRNFLOW_CACHE_NVME_BYTES</code>.</li>
-      <li><strong>High <code>s3_requests_total</code> rate:</strong> too many cache misses are hitting S3. This costs money and adds latency. Consider cache warmup, larger cache, or building an index.</li>
+      <li><strong>High <code>s3_requests_total</code> rate:</strong> too many cache misses are reaching the object-storage backend. This costs money and adds latency. Consider cache warmup, larger cache, or building an index.</li>
       <li><strong>Rising query latency:</strong> if cold queries dominate, build an IVF_PQ index. If warm queries are slow, check for serialisation overhead with large result sets.</li>
-      <li><strong>Write duration spikes:</strong> may indicate S3 throttling or contention. Check S3 request metrics and consider compaction.</li>
+      <li><strong>Write duration spikes:</strong> may indicate backend throttling or contention. Check the object-storage request metrics and consider compaction.</li>
     </ul>
 
   </main>

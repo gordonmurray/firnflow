@@ -157,6 +157,38 @@ fn gcs_storage_options() -> Option<HashMap<String, String>> {
     ))
 }
 
+/// Storage options for the native GCS backend (lance-io's `gcs`
+/// feature + `object_store::gcp`). Returns `None` if no Google
+/// credential variable is set so the test SKIPs cleanly. Forwards
+/// `GOOGLE_APPLICATION_CREDENTIALS` as an ADC path,
+/// `GOOGLE_SERVICE_ACCOUNT_PATH` as a service-account JSON file, and
+/// `GOOGLE_SERVICE_ACCOUNT_KEY` as inline JSON — `NamespaceManager`'s
+/// builder dispatch keeps these distinct, and lance-io reads the
+/// same env vars internally for its connect path.
+fn gcs_native_storage_options() -> Option<HashMap<String, String>> {
+    let mut opts = HashMap::new();
+    if let Ok(v) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+        if !v.trim().is_empty() {
+            opts.insert("google_application_credentials".into(), v);
+        }
+    }
+    if let Ok(v) = std::env::var("GOOGLE_SERVICE_ACCOUNT_PATH") {
+        if !v.trim().is_empty() {
+            opts.insert("google_service_account_path".into(), v);
+        }
+    }
+    if let Ok(v) = std::env::var("GOOGLE_SERVICE_ACCOUNT_KEY") {
+        if !v.trim().is_empty() {
+            opts.insert("google_service_account_key".into(), v);
+        }
+    }
+    if opts.is_empty() {
+        None
+    } else {
+        Some(opts)
+    }
+}
+
 fn spaces_storage_options() -> Option<HashMap<String, String>> {
     Some(compat_storage_options(
         std::env::var("SPACES_ENDPOINT").ok()?,
@@ -456,6 +488,62 @@ async fn concurrent_writers_100_runs_gcs() {
         run_stress(uri_base.clone(), opts.clone()).await;
         if run % 10 == 0 {
             eprintln!("gcs run {run}/{RUNS} passed");
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Native GCS routing (lance-io `gcs` feature + `object_store::gcp`).
+//
+// Distinct from the two tests above, which exercise the S3-interop
+// endpoint and serve as failure evidence — that path silently drops
+// `If-None-Match: *` and loses writers under contention. The pair
+// below uses `gs://{bucket}` so Lance routes through its native GCS
+// backend, which translates the conditional commit to the GCS
+// generation precondition (`x-goog-if-generation-match: 0`).
+// 100 clean runs against a single-region bucket is the support gate
+// for native GCS; future regressions surface here first.
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writers_preserve_all_rows_gcs_native() {
+    let Some(opts) = gcs_native_storage_options() else {
+        eprintln!(
+            "SKIP: set GOOGLE_APPLICATION_CREDENTIALS \
+             (or GOOGLE_SERVICE_ACCOUNT_PATH / GOOGLE_SERVICE_ACCOUNT_KEY) \
+             to run the native-GCS concurrent-writer stress"
+        );
+        return;
+    };
+    let Ok(bucket) = std::env::var("GCS_BUCKET") else {
+        eprintln!("SKIP: GCS_BUCKET not set");
+        return;
+    };
+    run_stress(format!("gs://{bucket}"), opts).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_writers_100_runs_gcs_native() {
+    let Some(opts) = gcs_native_storage_options() else {
+        eprintln!(
+            "SKIP: set GOOGLE_APPLICATION_CREDENTIALS \
+             (or GOOGLE_SERVICE_ACCOUNT_PATH / GOOGLE_SERVICE_ACCOUNT_KEY) \
+             to run the native-GCS 100-run stress"
+        );
+        return;
+    };
+    let Ok(bucket) = std::env::var("GCS_BUCKET") else {
+        eprintln!("SKIP: GCS_BUCKET not set");
+        return;
+    };
+    const RUNS: usize = 100;
+    let uri_base = format!("gs://{bucket}");
+    for run in 1..=RUNS {
+        run_stress(uri_base.clone(), opts.clone()).await;
+        if run % 10 == 0 {
+            eprintln!("gcs-native run {run}/{RUNS} passed");
         }
     }
 }

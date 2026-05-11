@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Deployment - Firn</title>
-  <meta name="description" content="Deploy Firn with Docker Compose for local development, or as a production container with AWS S3, MinIO, or R2.">
+  <meta name="description" content="Deploy Firn with Docker Compose for local development, or as a production container against AWS S3, MinIO, R2, Tigris, DigitalOcean Spaces, or native Google Cloud Storage.">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -72,7 +72,7 @@ docker compose up --build</code></pre>
 docker compose up -d minio minio-init
 
 # Run Firn directly
-FIRNFLOW_S3_BUCKET=firnflow \
+FIRNFLOW_STORAGE_URI=s3://firnflow \
 FIRNFLOW_S3_ENDPOINT=http://127.0.0.1:9000 \
 FIRNFLOW_S3_ACCESS_KEY=minioadmin \
 FIRNFLOW_S3_SECRET_KEY=minioadmin \
@@ -97,12 +97,13 @@ FIRNFLOW_S3_SECRET_KEY=minioadmin \
     <pre><code>docker run -d \
   --name firn \
   -p 3000:3000 \
-  -e FIRNFLOW_S3_BUCKET=my-production-bucket \
+  -e FIRNFLOW_STORAGE_URI=s3://my-production-bucket \
   -e FIRNFLOW_S3_REGION=eu-west-1 \
   -e FIRNFLOW_CACHE_MEMORY_BYTES=268435456 \
   -e FIRNFLOW_CACHE_NVME_BYTES=10737418240 \
   -v firn-cache:/var/lib/firnflow/cache \
   firnflow-api</code></pre>
+    <p>For native GCS, swap the URI scheme and mount a service-account JSON: <code>-e FIRNFLOW_STORAGE_URI=gs://my-production-bucket -e GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp-sa.json -v /etc/gcp-sa.json:/etc/gcp-sa.json:ro</code>. Everything else stays the same.</p>
 
     <div class="callout callout-info">
       <div class="callout-title">NVMe cache volume</div>
@@ -147,7 +148,7 @@ FIRNFLOW_S3_SECRET_KEY=minioadmin \
       "image": "firnflow-api:latest",
       "portMappings": [{"containerPort": 3000}],
       "environment": [
-        {"name": "FIRNFLOW_S3_BUCKET", "value": "my-firn-bucket"},
+        {"name": "FIRNFLOW_STORAGE_URI", "value": "s3://my-firn-bucket"},
         {"name": "FIRNFLOW_S3_REGION", "value": "eu-west-1"},
         {"name": "FIRNFLOW_CACHE_MEMORY_BYTES", "value": "268435456"},
         {"name": "FIRNFLOW_CACHE_NVME_BYTES", "value": "10737418240"}

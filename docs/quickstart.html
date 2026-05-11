@@ -90,7 +90,7 @@ docker compose up --build</code></pre>
     <pre><code>curl -X POST http://localhost:3000/ns/demo/query \
   -H 'Content-Type: application/json' \
   -d '{"vector": [1.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "k": 2}'</code></pre>
-    <p>Response (first query hits S3, populates the cache):</p>
+    <p>Response (first query hits the backend, populates the cache):</p>
     <pre><code>{
   "query_id": "a1b2c3d4",
   "results": [
@@ -101,7 +101,7 @@ docker compose up --build</code></pre>
 
     <div class="callout callout-info">
       <div class="callout-title">Cache in action</div>
-      Run the same query again. The second call returns from cache with zero S3 requests. You can verify this at <code>/metrics</code>.
+      Run the same query again. The second call returns from cache with zero object-storage requests. You can verify this at <code>/metrics</code>.
     </div>
 
     <h2>5. Add text for full-text search</h2>
@@ -135,7 +135,7 @@ curl -X POST http://localhost:3000/ns/articles/fts-index</code></pre>
   }'</code></pre>
 
     <h2>6. Check the metrics</h2>
-    <p>See exactly how many S3 requests Firn has saved you.</p>
+    <p>See exactly how many object-storage requests Firn has saved you.</p>
     <pre><code>curl -s http://localhost:3000/metrics | grep firnflow</code></pre>
     <p>Key lines to look for:</p>
     <pre><code>firnflow_cache_hits_total{namespace="demo"} 1
@@ -148,7 +148,7 @@ firnflow_cached_handles 1</code></pre>
     <h2>Next steps</h2>
     <ul>
       <li><a href="api.html">API reference</a> - all nine endpoints with full request and response schemas</li>
-      <li><a href="configuration.html">Configuration</a> - tune cache sizes, connect to AWS S3, and set up different storage backends</li>
+      <li><a href="configuration.html">Configuration</a> - tune cache sizes, connect to AWS S3, native GCS, or any other supported object-storage backend</li>
       <li><a href="deployment.html">Deployment</a> - run Firn in production with Docker or on Kubernetes</li>
       <li><a href="monitoring.html">Monitoring</a> - Prometheus metrics, PromQL examples, and alerting rules</li>
     </ul>
