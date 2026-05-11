@@ -27,11 +27,11 @@ pub enum FirnflowError {
     InvalidRequest(String),
 
     /// The requested operation or configuration is not supported by
-    /// this build. Two callers today: a namespace-level operation
-    /// whose Lance schema pre-dates a feature (the `/list` endpoint
-    /// surfaces this as HTTP 501), and a startup-time storage URI
-    /// using a scheme this build does not yet route (e.g. `gs://`
-    /// before native GCS support ships).
+    /// this build. Today the main caller is a namespace-level
+    /// operation whose Lance schema pre-dates a feature (the
+    /// `/list` endpoint surfaces this as HTTP 501); the variant
+    /// stays available for any future scheme- or feature-gated
+    /// rejection that needs the same shape.
     #[error("unsupported: {0}")]
     Unsupported(String),
 

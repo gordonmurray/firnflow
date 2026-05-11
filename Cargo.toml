@@ -17,7 +17,10 @@ license = "Apache-2.0"
 # Pinned exact per project conventions — bumps are a read-the-changelog event.
 # `aws` feature registers the S3 object store provider that lance-io
 # otherwise ships turned off through lancedb's transitive deps.
-lancedb = { version = "=0.27.2", features = ["aws"] }
+# `gcs` registers the native Google Cloud Storage backend so
+# `lancedb::connect("gs://bucket")` resolves to GoogleCloudStorage
+# rather than failing with "No object store provider found".
+lancedb = { version = "=0.27.2", features = ["aws", "gcs"] }
 lance = "=4.0.0"
 
 # Arrow — pinned to the major that lance 4.0.0 requires (^57).
@@ -26,9 +29,12 @@ arrow-schema = "57"
 
 # `object_store` — lance-io 4.0.0 requires `^0.12.3`, so we match
 # that minor. Used by the DELETE path in `NamespaceManager` to list
-# and delete the S3 prefix for a namespace; lance uses it
-# internally for every storage operation.
-object_store = { version = "0.12", features = ["aws"] }
+# and delete the namespace prefix; lance uses it internally for every
+# storage operation. `gcp` enables the native Google Cloud Storage
+# client (OAuth2 / service-account JSON) so the delete path can
+# follow `lancedb` onto a `gs://` bucket without going back through
+# the broken GCS S3-interop layer.
+object_store = { version = "0.12", features = ["aws", "gcp"] }
 
 # Hybrid RAM + NVMe cache.
 foyer = { version = "0.22", features = ["serde"] }

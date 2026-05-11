@@ -52,6 +52,7 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::table::OptimizeAction;
 use lancedb::DistanceType;
 use object_store::aws::AmazonS3Builder;
+use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::path::Path as ObjectStorePath;
 use object_store::ObjectStore;
 
@@ -485,14 +486,7 @@ impl NamespaceManager {
     fn build_object_store(&self) -> Result<Arc<dyn ObjectStore>, FirnflowError> {
         match self.storage_root.scheme() {
             Scheme::S3 => self.build_s3_object_store(),
-            Scheme::Gcs => Err(FirnflowError::Unsupported(
-                "GCS storage is not yet routable through NamespaceManager. \
-                 The StorageRoot parser rejects gs:// URIs at config time, \
-                 so this arm is unreachable in normal operation; if you see \
-                 this error, NamespaceManager was constructed with a Gcs \
-                 storage root by code that bypassed the parser."
-                    .into(),
-            )),
+            Scheme::Gcs => self.build_gcs_object_store(),
         }
     }
 
@@ -516,6 +510,49 @@ impl NamespaceManager {
         let store = builder
             .build()
             .map_err(|e| FirnflowError::Backend(format!("build object store: {e}")))?;
+        Ok(Arc::new(store))
+    }
+
+    /// Build a native `object_store::gcp` client for the configured
+    /// GCS bucket. Used by the namespace delete path, which lists
+    /// and removes objects under the namespace prefix; lancedb's
+    /// own GCS routing (via the `gcs` feature) goes through a
+    /// separate `lance-io` client keyed off the same credentials.
+    ///
+    /// Credential resolution mirrors what
+    /// `GoogleCloudStorageBuilder::from_env` already does — read
+    /// `GOOGLE_APPLICATION_CREDENTIALS` / `GOOGLE_SERVICE_ACCOUNT_PATH`
+    /// / `GOOGLE_SERVICE_ACCOUNT_KEY` directly — and additionally
+    /// honours any matching keys passed through `storage_options`,
+    /// so the same map used by lancedb covers both clients without
+    /// the operator having to set credentials twice.
+    fn build_gcs_object_store(&self) -> Result<Arc<dyn ObjectStore>, FirnflowError> {
+        let mut builder =
+            GoogleCloudStorageBuilder::from_env().with_bucket_name(self.storage_root.bucket());
+
+        for (key, value) in &self.storage_options {
+            // `google_application_credentials` and
+            // `google_service_account_path` are distinct concepts in
+            // `object_store::gcp`: the former is an
+            // application-default-credentials path (may resolve to
+            // user creds, federated identity, etc.), the latter
+            // strictly a service-account JSON path. The builder has
+            // separate setters for the two — keep them separate here
+            // so an ADC file that isn't a raw service-account JSON
+            // still authenticates the delete path correctly.
+            builder = match key.as_str() {
+                "google_service_account" | "google_service_account_path" => {
+                    builder.with_service_account_path(value)
+                }
+                "google_service_account_key" => builder.with_service_account_key(value),
+                "google_application_credentials" => builder.with_application_credentials(value),
+                _ => builder,
+            };
+        }
+
+        let store = builder
+            .build()
+            .map_err(|e| FirnflowError::Backend(format!("build GCS object store: {e}")))?;
         Ok(Arc::new(store))
     }
 
