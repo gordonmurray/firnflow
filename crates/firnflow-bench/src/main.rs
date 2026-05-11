@@ -18,7 +18,7 @@
 //!
 //! ```text
 //! docker compose up -d minio minio-init
-//! FIRNFLOW_S3_BUCKET=firnflow-test \
+//! FIRNFLOW_STORAGE_URI=s3://firnflow-test \
 //! FIRNFLOW_S3_ENDPOINT=http://127.0.0.1:9000 \
 //! FIRNFLOW_S3_ACCESS_KEY=minioadmin \
 //! FIRNFLOW_S3_SECRET_KEY=minioadmin \
@@ -27,11 +27,14 @@
 //!   ./scripts/cargo run --release -p firnflow-bench
 //! ```
 //!
-//! Env vars (all optional except `FIRNFLOW_S3_BUCKET`):
+//! Env vars: set `FIRNFLOW_STORAGE_URI` (preferred) or the legacy
+//! `FIRNFLOW_S3_BUCKET` — at least one must be set, and if both are
+//! set the URI wins. Everything else is optional.
 //!
 //! | var                             | default                                    |
 //! | ------------------------------- | ------------------------------------------ |
-//! | `FIRNFLOW_S3_BUCKET`            | *(required)*                               |
+//! | `FIRNFLOW_STORAGE_URI`          | *(required, or set `FIRNFLOW_S3_BUCKET`)*  |
+//! | `FIRNFLOW_S3_BUCKET`            | *(legacy fallback for the URI)*            |
 //! | `FIRNFLOW_S3_ENDPOINT`          | (real AWS)                                 |
 //! | `FIRNFLOW_S3_ACCESS_KEY`        | (default credential chain)                 |
 //! | `FIRNFLOW_S3_SECRET_KEY`        | (default credential chain)                 |
@@ -53,11 +56,12 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use firnflow_core::cache::NamespaceCache;
 use firnflow_core::{
-    CoreMetrics, NamespaceId, NamespaceManager, NamespaceService, QueryRequest, UpsertRow,
+    CoreMetrics, NamespaceId, NamespaceManager, NamespaceService, QueryRequest, StorageRoot,
+    UpsertRow,
 };
 
 struct BenchConfig {
-    bucket: String,
+    storage_root: StorageRoot,
     storage_options: HashMap<String, String>,
     dim: usize,
     rows: usize,
@@ -70,8 +74,30 @@ struct BenchConfig {
 
 impl BenchConfig {
     fn from_env() -> anyhow::Result<Self> {
-        let bucket =
-            std::env::var("FIRNFLOW_S3_BUCKET").context("FIRNFLOW_S3_BUCKET must be set")?;
+        // Prefer FIRNFLOW_STORAGE_URI (so a fixed prefix in the
+        // operator config carries through to the bench), fall back
+        // to the legacy FIRNFLOW_S3_BUCKET. No strict disagreement
+        // check here — bench is a dev tool, not a deployment
+        // surface. Empty strings count as unset so accidental
+        // `FIRNFLOW_STORAGE_URI=` exports don't shadow the bucket
+        // fallback.
+        let uri = std::env::var("FIRNFLOW_STORAGE_URI")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let bucket = std::env::var("FIRNFLOW_S3_BUCKET")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let storage_root = match (uri, bucket) {
+            (Some(uri), _) => StorageRoot::parse(&uri)
+                .map_err(|e| anyhow::anyhow!("FIRNFLOW_STORAGE_URI ({uri:?}): {e}"))?,
+            (None, Some(bucket)) => StorageRoot::s3_bucket(&bucket)
+                .map_err(|e| anyhow::anyhow!("FIRNFLOW_S3_BUCKET ({bucket:?}): {e}"))?,
+            (None, None) => anyhow::bail!(
+                "set FIRNFLOW_STORAGE_URI=s3://bucket or the legacy FIRNFLOW_S3_BUCKET=bucket"
+            ),
+        };
         let dim: usize = env_or("FIRNFLOW_BENCH_DIM", "32")
             .parse()
             .context("FIRNFLOW_BENCH_DIM")?;
@@ -113,7 +139,7 @@ impl BenchConfig {
         );
 
         Ok(Self {
-            bucket,
+            storage_root,
             storage_options: opts,
             dim,
             rows,
@@ -236,20 +262,20 @@ async fn main() -> anyhow::Result<()> {
     let cfg = BenchConfig::from_env()?;
     println!(
         "bench config: dim={}, rows={}, queries={}, nprobes={}, \
-         cache_ram={}MB, cache_nvme={}MB, bucket={}",
+         cache_ram={}MB, cache_nvme={}MB, storage_root={}",
         cfg.dim,
         cfg.rows,
         cfg.queries,
         cfg.nprobes,
         cfg.cache_ram_bytes / (1024 * 1024),
         cfg.cache_nvme_bytes / (1024 * 1024),
-        cfg.bucket
+        cfg.storage_root
     );
 
     let tmp = tempfile::tempdir()?;
     let metrics = Arc::new(CoreMetrics::new()?);
     let manager = Arc::new(NamespaceManager::new(
-        cfg.bucket.clone(),
+        cfg.storage_root.clone(),
         cfg.storage_options.clone(),
         Arc::clone(&metrics),
     ));

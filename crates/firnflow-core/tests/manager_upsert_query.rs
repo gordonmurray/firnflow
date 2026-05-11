@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 
 use firnflow_core::metrics::test_metrics;
-use firnflow_core::{NamespaceId, NamespaceManager, UpsertRow};
+use firnflow_core::{NamespaceId, NamespaceManager, StorageRoot, UpsertRow};
 
 const DIM: usize = 8;
 
@@ -63,7 +63,11 @@ fn unit_vector(axis: usize) -> Vec<f32> {
 #[ignore]
 async fn upsert_then_query_returns_nearest_neighbor() {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
-    let manager = NamespaceManager::new(bucket, minio_options(), test_metrics());
+    let manager = NamespaceManager::new(
+        StorageRoot::s3_bucket(&bucket).unwrap(),
+        minio_options(),
+        test_metrics(),
+    );
     let ns = NamespaceId::new(unique_namespace("upsert-query")).unwrap();
 
     // Four orthogonal unit vectors along the first four axes.
@@ -105,7 +109,11 @@ async fn upsert_then_query_returns_nearest_neighbor() {
 #[ignore]
 async fn upsert_validates_vector_dimension() {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
-    let manager = NamespaceManager::new(bucket, minio_options(), test_metrics());
+    let manager = NamespaceManager::new(
+        StorageRoot::s3_bucket(&bucket).unwrap(),
+        minio_options(),
+        test_metrics(),
+    );
     let ns = NamespaceId::new(unique_namespace("dim-validation")).unwrap();
 
     // Establish the namespace dimension via a valid first upsert.

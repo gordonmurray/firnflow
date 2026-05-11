@@ -13,6 +13,7 @@ use firnflow_api::auth::{AuthConfig, Secret};
 use firnflow_api::config::AppConfig;
 use firnflow_api::rate_limit::RateLimitSettings;
 use firnflow_api::router;
+use firnflow_core::StorageRoot;
 use serde_json::json;
 use std::collections::HashMap;
 use tower::ServiceExt;
@@ -246,7 +247,7 @@ async fn secret_debug_does_not_leak_in_app_config() {
 
     let cfg = AppConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
-        bucket: "test".into(),
+        storage_root: StorageRoot::s3_bucket("test").unwrap(),
         cache_memory_bytes: 0,
         cache_nvme_path: std::env::temp_dir(),
         cache_nvme_bytes: 0,
@@ -301,7 +302,7 @@ async fn duplicate_keys_fail_startup_before_cache_setup() {
 
     let cfg = AppConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
-        bucket: "firnflow-offline".into(),
+        storage_root: StorageRoot::s3_bucket("firnflow-offline").unwrap(),
         cache_memory_bytes: 0,
         cache_nvme_path: not_a_directory,
         cache_nvme_bytes: 0,

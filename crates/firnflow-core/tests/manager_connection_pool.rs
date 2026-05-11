@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use firnflow_core::metrics::test_metrics;
-use firnflow_core::{NamespaceId, NamespaceManager, UpsertRow};
+use firnflow_core::{NamespaceId, NamespaceManager, StorageRoot, UpsertRow};
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -79,7 +79,11 @@ fn seed_rows(dim: usize) -> Vec<UpsertRow> {
 async fn cached_handle_survives_across_operations() {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
     let metrics = test_metrics();
-    let manager = NamespaceManager::new(bucket, minio_options(), Arc::clone(&metrics));
+    let manager = NamespaceManager::new(
+        StorageRoot::s3_bucket(&bucket).unwrap(),
+        minio_options(),
+        Arc::clone(&metrics),
+    );
     let ns = NamespaceId::new(unique_namespace("pool-reuse")).unwrap();
 
     assert_eq!(manager.pool_size(), 0, "pool starts empty");
@@ -148,7 +152,11 @@ async fn cached_handle_survives_across_operations() {
 async fn handle_evicted_on_namespace_delete() {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
     let metrics = test_metrics();
-    let manager = NamespaceManager::new(bucket, minio_options(), Arc::clone(&metrics));
+    let manager = NamespaceManager::new(
+        StorageRoot::s3_bucket(&bucket).unwrap(),
+        minio_options(),
+        Arc::clone(&metrics),
+    );
     let ns = NamespaceId::new(unique_namespace("pool-delete")).unwrap();
 
     // Establish the namespace at dim=8.
@@ -192,7 +200,11 @@ async fn handle_evicted_on_namespace_delete() {
 async fn handle_evicted_after_compaction() {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
     let metrics = test_metrics();
-    let manager = NamespaceManager::new(bucket, minio_options(), Arc::clone(&metrics));
+    let manager = NamespaceManager::new(
+        StorageRoot::s3_bucket(&bucket).unwrap(),
+        minio_options(),
+        Arc::clone(&metrics),
+    );
     let ns = NamespaceId::new(unique_namespace("pool-compact")).unwrap();
 
     // Write enough fragments to make compaction meaningful.
@@ -249,7 +261,11 @@ async fn handle_evicted_after_scalar_index_build() {
     // operation to open a fresh Table view.
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
     let metrics = test_metrics();
-    let manager = NamespaceManager::new(bucket, minio_options(), Arc::clone(&metrics));
+    let manager = NamespaceManager::new(
+        StorageRoot::s3_bucket(&bucket).unwrap(),
+        minio_options(),
+        Arc::clone(&metrics),
+    );
     let ns = NamespaceId::new(unique_namespace("pool-scalar-index")).unwrap();
 
     manager

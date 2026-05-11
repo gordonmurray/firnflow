@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
     let config = AppConfig::from_env().context("load config")?;
     tracing::info!(
         bind = %config.bind,
-        bucket = %config.bucket,
+        storage_root = %config.storage_root,
         "starting firnflow-api"
     );
 

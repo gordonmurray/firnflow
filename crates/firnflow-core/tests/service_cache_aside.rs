@@ -29,7 +29,9 @@ use std::sync::Arc;
 
 use firnflow_core::cache::NamespaceCache;
 use firnflow_core::metrics::test_metrics;
-use firnflow_core::{NamespaceId, NamespaceManager, NamespaceService, QueryRequest, UpsertRow};
+use firnflow_core::{
+    NamespaceId, NamespaceManager, NamespaceService, QueryRequest, StorageRoot, UpsertRow,
+};
 
 const DIM: usize = 8;
 
@@ -79,7 +81,7 @@ async fn service_cache_aside_invalidates_on_upsert() {
     let tmp = tempfile::tempdir().unwrap();
     let metrics = test_metrics();
     let manager = Arc::new(NamespaceManager::new(
-        bucket,
+        StorageRoot::s3_bucket(&bucket).unwrap(),
         minio_options(),
         Arc::clone(&metrics),
     ));

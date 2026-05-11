@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use firnflow_core::metrics::test_metrics;
 use firnflow_core::{
-    decode_list_cursor, ListOrder, ListRow, NamespaceId, NamespaceManager, UpsertRow,
+    decode_list_cursor, ListOrder, ListRow, NamespaceId, NamespaceManager, StorageRoot, UpsertRow,
 };
 
 const DIM: usize = 4;
@@ -75,7 +75,11 @@ fn unit_vector(axis: usize) -> Vec<f32> {
 #[ignore]
 async fn list_paginates_in_strict_ingest_order() {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
-    let manager = NamespaceManager::new(bucket, minio_options(), test_metrics());
+    let manager = NamespaceManager::new(
+        StorageRoot::s3_bucket(&bucket).unwrap(),
+        minio_options(),
+        test_metrics(),
+    );
     let ns = NamespaceId::new(unique_namespace("issue22")).unwrap();
 
     // Seed `BATCHES` separated batches so each batch gets a distinct
@@ -176,7 +180,11 @@ async fn list_paginates_in_strict_ingest_order() {
 #[ignore]
 async fn list_empty_namespace_returns_empty_page() {
     let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
-    let manager = NamespaceManager::new(bucket, minio_options(), test_metrics());
+    let manager = NamespaceManager::new(
+        StorageRoot::s3_bucket(&bucket).unwrap(),
+        minio_options(),
+        test_metrics(),
+    );
     let ns = NamespaceId::new(unique_namespace("issue22-empty")).unwrap();
 
     let page = manager
