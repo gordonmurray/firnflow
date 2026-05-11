@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-11
+
 ### Added
 - `FIRNFLOW_STORAGE_URI` is the preferred way to point firnflow at object storage. It accepts a URI of the form `scheme://bucket[/prefix...]` and resolves into a `StorageRoot` that the namespace manager threads through every operation: connection URI for `lancedb::connect`, object-store-relative paths for `delete()`, and a scheme tag the manager dispatches on when picking an `object_store` builder. Multi-segment prefixes are supported (`s3://my-bucket/tenants/acme/prod` or `gs://my-bucket/tenants/acme/prod`) for operators sharing a bucket across deployments; trailing slashes are canonicalised away so `s3://foo` and `s3://foo/` parse to the same root. Both `s3://` (any S3-compatible backend) and `gs://` (native Google Cloud Storage) are routable schemes. Refs #37.
 - Native Google Cloud Storage routing. `FIRNFLOW_STORAGE_URI=gs://bucket[/prefix...]` is a fully-supported configuration: lancedb resolves the URI through its own `gcs` feature, and `NamespaceManager`'s delete path uses the matching `object_store::gcp::GoogleCloudStorage` client. Both clients authenticate from the standard Google env vars: service-account JSON via `GOOGLE_SERVICE_ACCOUNT_PATH` (file path) or `GOOGLE_SERVICE_ACCOUNT_KEY` (inline JSON), or any valid application-default-credentials file via `GOOGLE_APPLICATION_CREDENTIALS` (which may resolve to a service-account JSON, federated identity, user creds, etc.). The two are distinct setter paths in the object-store delete client — collapsing them would mean an ADC file that is not itself a raw service-account JSON would authenticate the connect path but fail the delete path. An operator only configures credentials once and gets both halves of the routing for free. This is the path Firn writes go through end-to-end — the GCS S3-interop endpoint is a deliberately separate (and known-broken) layer, not the path this URI hits. GCS is supported ✅ in the compatibility matrix as of this release; see the matrix-flip bullet below for the gating stress evidence. Refs #37.
@@ -126,7 +128,8 @@ development through phases 1 through 8 before being made public;
   benchmark at dim=1536, 100k rows available at
   `bench/results/cold_vs_warm_aws.md`.
 
-[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/gordonmurray/firnflow/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/gordonmurray/firnflow/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/gordonmurray/firnflow/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/gordonmurray/firnflow/compare/v0.2.0...v0.3.0
