@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use firnflow_core::StorageRoot;
+use firnflow_core::{Scheme, StorageRoot};
 
 use crate::auth::Secret;
 use crate::rate_limit::RateLimitSettings;
@@ -34,8 +34,10 @@ pub struct AppConfig {
     pub cache_nvme_path: PathBuf,
     /// NVMe tier capacity, in bytes.
     pub cache_nvme_bytes: usize,
-    /// `object_store`-style S3 options passed straight through to
-    /// `NamespaceManager` and, transitively, to lancedb.
+    /// `object_store`-style options passed straight through to
+    /// `NamespaceManager` and, transitively, to lancedb. The exact
+    /// keys depend on the resolved scheme: `aws_*` for S3-family
+    /// backends, `google_*` for native GCS.
     pub storage_options: HashMap<String, String>,
     /// `FIRNFLOW_API_KEY` — required for the read/write tier when
     /// auth is enabled. `None` ⇒ disabled.
@@ -59,9 +61,21 @@ pub struct AppConfig {
 /// needing a code update.
 fn is_sensitive_storage_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
-    ["secret", "password", "token", "access_key", "credential"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    // `service_account_key` covers GCS inline service-account JSON
+    // (`google_service_account_key` / `service_account_key`) without
+    // also redacting the harmless `service_account_path` form. Path
+    // values are file locations, not the credentials themselves —
+    // file contents are the secret, not the path.
+    [
+        "secret",
+        "password",
+        "token",
+        "access_key",
+        "credential",
+        "service_account_key",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 impl std::fmt::Debug for AppConfig {
@@ -114,7 +128,7 @@ impl AppConfig {
             .parse()
             .context("FIRNFLOW_CACHE_NVME_BYTES")?;
 
-        let storage_options = build_storage_options();
+        let storage_options = build_storage_options_for(storage_root.scheme());
 
         let api_key = optional_secret("FIRNFLOW_API_KEY");
         let admin_api_key = optional_secret("FIRNFLOW_ADMIN_API_KEY");
@@ -213,8 +227,8 @@ pub fn resolve_storage_root(
 
     match (uri, bucket) {
         (None, None) => Err(anyhow::anyhow!(
-            "set FIRNFLOW_STORAGE_URI=s3://bucket (or FIRNFLOW_STORAGE_URI=gs://bucket once \
-             native GCS support ships) or the legacy FIRNFLOW_S3_BUCKET=bucket"
+            "set FIRNFLOW_STORAGE_URI=s3://bucket or FIRNFLOW_STORAGE_URI=gs://bucket, \
+             or the legacy FIRNFLOW_S3_BUCKET=bucket"
         )),
         (Some(uri), None) => {
             let root = StorageRoot::parse(uri).with_context(|| {
@@ -258,7 +272,24 @@ pub fn resolve_storage_root(
     }
 }
 
-fn build_storage_options() -> HashMap<String, String> {
+/// Build the `object_store`-style options map for the resolved
+/// storage scheme. S3-family backends read the `FIRNFLOW_S3_*`
+/// block; native GCS routes through service-account JSON loaded by
+/// `GoogleCloudStorageBuilder::from_env` — there is no
+/// firnflow-specific env-var translation needed because the
+/// standard `GOOGLE_*` vars are already what the underlying client
+/// reads. We surface a couple of explicit options when set so an
+/// operator can override the `from_env` defaults without exporting
+/// `GOOGLE_*` (e.g. a deployment that wants the SA path scoped to
+/// firnflow rather than process-wide).
+fn build_storage_options_for(scheme: Scheme) -> HashMap<String, String> {
+    match scheme {
+        Scheme::S3 => build_s3_storage_options(),
+        Scheme::Gcs => build_gcs_storage_options(),
+    }
+}
+
+fn build_s3_storage_options() -> HashMap<String, String> {
     let mut opts = HashMap::new();
     if let Ok(v) = std::env::var("FIRNFLOW_S3_ENDPOINT") {
         // Custom endpoint implies MinIO / a local S3 emulator: force
@@ -279,6 +310,38 @@ fn build_storage_options() -> HashMap<String, String> {
         "aws_region".into(),
         env_or("FIRNFLOW_S3_REGION", "us-east-1"),
     );
+    opts
+}
+
+fn build_gcs_storage_options() -> HashMap<String, String> {
+    // The native `object_store::gcp` client and lance-io's GCS
+    // backend both call `from_env()` internally and pick up the
+    // standard `GOOGLE_APPLICATION_CREDENTIALS` /
+    // `GOOGLE_SERVICE_ACCOUNT_PATH` / `GOOGLE_SERVICE_ACCOUNT_KEY`
+    // variables without our help. We only need to forward the SA
+    // path or key when an operator wants it scoped to firnflow
+    // rather than the process — `GOOGLE_APPLICATION_CREDENTIALS`
+    // and `GOOGLE_SERVICE_ACCOUNT_PATH` map to the same
+    // `service_account_path`; `GOOGLE_SERVICE_ACCOUNT_KEY` is the
+    // inline-JSON form. Empty values are skipped so an accidental
+    // `GOOGLE_APPLICATION_CREDENTIALS=` export does not shadow a
+    // valid path provided through the other vars.
+    let mut opts = HashMap::new();
+    for (env_key, opt_key) in [
+        (
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "google_application_credentials",
+        ),
+        ("GOOGLE_SERVICE_ACCOUNT_PATH", "google_service_account_path"),
+        ("GOOGLE_SERVICE_ACCOUNT_KEY", "google_service_account_key"),
+    ] {
+        if let Ok(v) = std::env::var(env_key) {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                opts.insert(opt_key.into(), trimmed.into());
+            }
+        }
+    }
     opts
 }
 
@@ -332,6 +395,15 @@ mod tests {
         assert!(is_sensitive_storage_key("aws_session_token"));
         assert!(is_sensitive_storage_key("gcs_credentials"));
         assert!(is_sensitive_storage_key("user_password"));
+        // Inline GCS service-account JSON must be caught; the path
+        // form is a file location, not the credential itself, and
+        // stays visible so an operator can see at a glance which SA
+        // file the deployment is pointing at.
+        assert!(is_sensitive_storage_key("google_service_account_key"));
+        assert!(is_sensitive_storage_key("service_account_key"));
+        assert!(is_sensitive_storage_key("GOOGLE_SERVICE_ACCOUNT_KEY"));
+        assert!(is_sensitive_storage_key("google_application_credentials"));
+        assert!(!is_sensitive_storage_key("google_service_account_path"));
         assert!(!is_sensitive_storage_key("aws_endpoint"));
         assert!(!is_sensitive_storage_key("aws_region"));
         assert!(!is_sensitive_storage_key("allow_http"));
@@ -385,6 +457,57 @@ mod tests {
         assert!(
             dbg.contains("eu-west-1"),
             "non-sensitive region should not be redacted: {dbg}"
+        );
+    }
+
+    #[test]
+    fn debug_redacts_inline_gcs_service_account_json() {
+        // The whole *point* of `google_service_account_key` is to
+        // carry a service-account JSON blob inline. An operator who
+        // logs `tracing::info!(?cfg)` must not have that JSON spilled
+        // into the log; the path form (a file location) stays visible
+        // because it is useful for diagnosing which deployment is
+        // pointing where.
+        let mut opts = HashMap::new();
+        opts.insert(
+            "google_service_account_key".into(),
+            "{\"type\":\"service_account\",\"private_key\":\"UNIQUE_GCS_PRIVATE_KEY_DO_NOT_LEAK\"}"
+                .into(),
+        );
+        opts.insert(
+            "google_service_account_path".into(),
+            "/etc/firnflow/gcp-sa.json".into(),
+        );
+        opts.insert(
+            "google_application_credentials".into(),
+            "/etc/firnflow/adc.json".into(),
+        );
+
+        let cfg = AppConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            storage_root: StorageRoot::parse("gs://firn-gcs-test").unwrap(),
+            cache_memory_bytes: 0,
+            cache_nvme_path: std::env::temp_dir(),
+            cache_nvme_bytes: 0,
+            storage_options: opts,
+            api_key: None,
+            admin_api_key: None,
+            metrics_token: None,
+            rate_limit: RateLimitSettings::default(),
+        };
+
+        let dbg = format!("{:?}", cfg);
+        assert!(
+            !dbg.contains("UNIQUE_GCS_PRIVATE_KEY"),
+            "inline GCS service-account JSON leaked in Debug: {dbg}"
+        );
+        // Path entries are sensitive-credential-adjacent; the
+        // application-credentials path is caught by `credential`,
+        // and that is fine. The plain service-account *path* form is
+        // a file location only, so it remains visible.
+        assert!(
+            dbg.contains("/etc/firnflow/gcp-sa.json"),
+            "service-account path should not be redacted: {dbg}"
         );
     }
 }

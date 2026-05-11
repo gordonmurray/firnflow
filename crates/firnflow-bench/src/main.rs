@@ -29,7 +29,9 @@
 //!
 //! Env vars: set `FIRNFLOW_STORAGE_URI` (preferred) or the legacy
 //! `FIRNFLOW_S3_BUCKET` — at least one must be set, and if both are
-//! set the URI wins. Everything else is optional.
+//! set the URI wins. `FIRNFLOW_STORAGE_URI` accepts both `s3://...`
+//! and `gs://...`; the legacy var is S3-only. Everything else is
+//! optional.
 //!
 //! | var                             | default                                    |
 //! | ------------------------------- | ------------------------------------------ |

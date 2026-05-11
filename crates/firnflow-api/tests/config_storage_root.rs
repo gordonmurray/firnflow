@@ -15,8 +15,8 @@
 //! 5. Neither set → hard-fail naming both env vars.
 //!
 //! Plus dedicated coverage for the normalised-comparison rule (so
-//! `s3://foo` and a bare `foo` agree) and the `gs://` rejection that
-//! holds until native-GCS routing is wired in a follow-up release.
+//! `s3://foo` and a bare `foo` agree) and that `gs://` URIs round
+//! through to the GCS scheme cleanly.
 
 use firnflow_api::config::{resolve_storage_root, ResolvedStorageRoot};
 use firnflow_core::StorageRoot;
@@ -119,21 +119,21 @@ fn empty_strings_are_treated_as_unset() {
 }
 
 #[test]
-fn gs_uri_is_rejected_as_unsupported() {
-    // GCS remains disabled until native routing is wired: gs://
-    // must surface as Unsupported rather than as a generic parse
-    // failure. The wrapping anyhow context still names
-    // FIRNFLOW_STORAGE_URI so the operator knows which env var to
-    // fix; the inner message names the scheme and the forward-
-    // looking note about the planned follow-up release.
-    let msg = expect_err(Some("gs://firn-gcs-bucket"), None);
-    assert!(
-        msg.contains("FIRNFLOW_STORAGE_URI"),
-        "error must name the offending env var: {msg}"
+fn gs_uri_resolves_to_native_gcs() {
+    // gs:// must round through to the GCS scheme so downstream
+    // dispatch in NamespaceManager and AppConfig picks the native
+    // GoogleCloudStorage client rather than falling back to the
+    // S3-interop layer. The resolver is the only thing the operator
+    // touches via env vars; a regression that quietly demoted the
+    // scheme to S3 would route writes through the wrong endpoint.
+    let out = expect_ok(Some("gs://firn-gcs-bucket"), None);
+    assert_eq!(
+        out.root,
+        StorageRoot::parse("gs://firn-gcs-bucket").unwrap()
     );
     assert!(
-        msg.contains("follow-up release") || msg.contains("not supported"),
-        "error must mention that GCS is a planned but not-yet-routable scheme: {msg}"
+        !out.fallback_logged,
+        "gs:// URI is a first-class form; legacy-fallback log must not fire"
     );
 }
 

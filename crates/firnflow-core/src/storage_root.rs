@@ -8,13 +8,12 @@
 //! parts of `firnflow-core` that need to construct namespace URIs and
 //! `object_store` clients.
 //!
-//! GCS is parsed as a *recognised* scheme but explicitly rejected as
-//! an unsupported config in this build. Routing `gs://` URIs through
-//! the lancedb / `object_store` GCS backends ships in a follow-up
-//! release; until then, [`StorageRoot::parse`] returns
-//! [`FirnflowError::Unsupported`] for any `gs://` URI so the API
-//! layer fails to start with a clear message rather than half-booting
-//! into a state the manager cannot serve.
+//! Both `s3://` and `gs://` are routable schemes. The actual
+//! `object_store` client and lancedb backend are picked by
+//! [`Scheme`] downstream — see `NamespaceManager::build_object_store`
+//! for the dispatch. GCS routing uses the native
+//! `object_store::gcp::GoogleCloudStorage` backend (OAuth2 /
+//! service-account JSON), not the S3-interop endpoint.
 //!
 //! Trailing slashes are canonicalised away by the parser so that
 //! `s3://foo` and `s3://foo/` produce identical structs. Empty
@@ -28,10 +27,11 @@ use crate::namespace::NamespaceId;
 /// Object-storage scheme. `S3` covers any S3-compatible backend
 /// (AWS, MinIO, R2, Tigris, DigitalOcean Spaces) — the wire shape is
 /// the same; the storage-options map carries provider-specific
-/// endpoint and addressing tweaks. `Gcs` is reserved for native
-/// Google Cloud Storage routing via lancedb's `gcs` feature; it is
-/// not yet wired through the manager and will be rejected at parse
-/// time until that lands.
+/// endpoint and addressing tweaks. `Gcs` routes through lancedb's
+/// `gcs` feature and the matching `object_store::gcp` client; auth
+/// is OAuth2 via a service-account JSON, not SigV4 — the GCS
+/// S3-interop layer is a deliberately separate (and unsupported)
+/// path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Scheme {
     /// Any S3-compatible backend. The wire shape is identical
@@ -39,9 +39,10 @@ pub enum Scheme {
     /// path-style addressing, region) live in the storage-options
     /// map alongside.
     S3,
-    /// Native Google Cloud Storage. Recognised by the parser but
-    /// not yet routable through `NamespaceManager` — see the
-    /// module-level docstring.
+    /// Native Google Cloud Storage. Lancedb resolves `gs://` URIs
+    /// through `lance-io`'s native backend, and the delete path
+    /// drops into `object_store::gcp::GoogleCloudStorage` keyed off
+    /// the same credentials.
     Gcs,
 }
 
@@ -73,18 +74,15 @@ pub struct StorageRoot {
 }
 
 impl StorageRoot {
-    /// Parse a URI of the form `scheme://bucket[/prefix...]`. The
-    /// only currently-routable scheme is `s3`; `gs` is recognised but
-    /// rejected with [`FirnflowError::Unsupported`] until native GCS
-    /// routing ships.
+    /// Parse a URI of the form `scheme://bucket[/prefix...]`.
+    /// Supported schemes are `s3` (any S3-compatible backend) and
+    /// `gs` (native Google Cloud Storage).
     ///
     /// # Errors
     ///
     /// - `InvalidRequest` if the URI is empty, missing the `://`
     ///   separator, or has an empty bucket segment.
     /// - `InvalidRequest` if the scheme is neither `s3` nor `gs`.
-    /// - `Unsupported` if the scheme is `gs`. This is a deliberate
-    ///   parse-time gate — see the module-level docstring.
     pub fn parse(uri: &str) -> Result<Self, FirnflowError> {
         let uri = uri.trim();
         if uri.is_empty() {
@@ -100,13 +98,7 @@ impl StorageRoot {
 
         let scheme = match scheme_part {
             "s3" => Scheme::S3,
-            "gs" => {
-                return Err(FirnflowError::Unsupported(format!(
-                    "storage URI {uri:?} uses the gs:// scheme, which this build cannot route. \
-                     Native GCS support ships in a follow-up release. Configure an s3:// URI \
-                     against an S3-compatible backend (AWS, MinIO, R2, Tigris, Spaces) for now."
-                )));
-            }
+            "gs" => Scheme::Gcs,
             other => {
                 return Err(FirnflowError::InvalidRequest(format!(
                     "storage URI {uri:?} uses unrecognised scheme {other:?}; \
@@ -329,28 +321,33 @@ mod tests {
     }
 
     #[test]
-    fn parse_recognises_gs_but_rejects_as_unsupported() {
-        // gs:// must reach the Unsupported arm specifically — not
-        // the generic "unrecognised scheme" arm — so the operator
-        // sees a precise message about the missing GCS routing
-        // rather than a generic "supported schemes are s3, gs" line.
-        let err = StorageRoot::parse("gs://firn-gcs-bucket").unwrap_err();
-        assert!(
-            matches!(err, FirnflowError::Unsupported(_)),
-            "gs:// must surface as Unsupported, got {err:?}"
-        );
-        let msg = err.to_string();
-        assert!(msg.contains("gs://"), "expected gs:// in message: {msg}");
-        assert!(
-            msg.contains("follow-up release"),
-            "expected forward-looking message: {msg}"
-        );
+    fn parse_gs_bare_bucket() {
+        let root = StorageRoot::parse("gs://firn-gcs-bucket").unwrap();
+        assert_eq!(root.scheme(), Scheme::Gcs);
+        assert_eq!(root.bucket(), "firn-gcs-bucket");
+        assert_eq!(root.prefix(), None);
     }
 
     #[test]
-    fn parse_rejects_gs_with_prefix_too() {
-        let err = StorageRoot::parse("gs://firn-gcs-bucket/some/prefix").unwrap_err();
-        assert!(matches!(err, FirnflowError::Unsupported(_)));
+    fn parse_gs_with_prefix() {
+        let root = StorageRoot::parse("gs://firn-gcs-bucket/some/prefix").unwrap();
+        assert_eq!(root.scheme(), Scheme::Gcs);
+        assert_eq!(root.bucket(), "firn-gcs-bucket");
+        assert_eq!(root.prefix(), Some("some/prefix"));
+    }
+
+    #[test]
+    fn namespace_uri_for_gs_scheme() {
+        // gs:// must round-trip through namespace_uri so the manager
+        // hands lancedb::connect the same scheme the operator
+        // configured — never silently rewriting to s3://.
+        let root = StorageRoot::parse("gs://firn-gcs-bucket").unwrap();
+        assert_eq!(root.namespace_uri(&ns("docs")), "gs://firn-gcs-bucket/docs");
+        let root = StorageRoot::parse("gs://firn-gcs-bucket/tenants/acme").unwrap();
+        assert_eq!(
+            root.namespace_uri(&ns("docs")),
+            "gs://firn-gcs-bucket/tenants/acme/docs"
+        );
     }
 
     #[test]
