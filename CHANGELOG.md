@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-24
+
 ### Added
 - **Multivector namespaces.** Each namespace is now one of two vector kinds — *single-vector* (the existing behaviour, one dense vector per row, `FixedSizeList<Float32, dim>`) or *multivector* (a variable-length bag of small fixed-dimension sub-vectors per row, `List<FixedSizeList<Float32, dim>>`, scored by MaxSim). The multivector shape is what ColBERT, ColPali, and ColQwen2 produce; it gives compositional queries (e.g. *"a man with a logo on his shirt"*) the ability to match each query element independently instead of collapsing the whole query into one summary vector. The kind is determined by the first upsert into a namespace and is immutable thereafter. Single-vector callers continue to use `vector: [f32, ...]`; multivector callers use `vectors: [[f32, ...], ...]`. The payload shape must match the namespace kind on every subsequent request — a mismatched payload returns 400 with the expected shape named in the error. lancedb's index code path is unchanged (`Index::IvfPq` works for both kinds; Lance dispatches the late-interaction scoring path automatically from the column type), and the existing RRF auto-hybrid keeps working when multivector and FTS are combined on the same query. Lance's late-interaction index supports cosine distance exclusively; `IndexRequest` does not expose a metric override on the API surface, so `create_index` simply constructs the IVF_PQ builder with cosine internally when the column is multivector and with L2 otherwise.
 - `VectorKind` enum exported from `firnflow_core` with `Single` and `Multivector` variants, plus `NamespaceManager::kind_for(&NamespaceId)` to read a namespace's resolved kind. The kind is inferred from the Lance table's vector column type at open time and cached alongside the existing dim.
@@ -143,7 +145,8 @@ development through phases 1 through 8 before being made public;
   benchmark at dim=1536, 100k rows available at
   `bench/results/cold_vs_warm_aws.md`.
 
-[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/gordonmurray/firnflow/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/gordonmurray/firnflow/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/gordonmurray/firnflow/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/gordonmurray/firnflow/compare/v0.3.0...v0.4.0
