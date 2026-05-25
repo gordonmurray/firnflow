@@ -2577,6 +2577,7 @@ version = "0.7.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "async-trait",
  "aws-config",
  "aws-sdk-s3",
  "bincode 2.0.1",
@@ -2584,6 +2585,7 @@ dependencies = [
  "foyer",
  "futures",
  "lance",
+ "lance-core",
  "lancedb",
  "object_store 0.12.5",
  "prometheus",

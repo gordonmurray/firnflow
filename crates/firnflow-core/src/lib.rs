@@ -7,6 +7,7 @@
 #![warn(missing_docs)]
 
 pub mod cache;
+pub mod cachebackend;
 pub mod error;
 pub mod manager;
 pub mod metrics;

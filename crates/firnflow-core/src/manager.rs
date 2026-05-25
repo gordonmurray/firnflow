@@ -174,6 +174,13 @@ pub struct NamespaceManager {
     /// namespace delete / index build / compaction.
     handles: DashMap<NamespaceId, NamespaceHandle>,
     metrics: Arc<CoreMetrics>,
+    /// Optional shared `lance::session::Session`. When set, every
+    /// `lancedb::connect(...)` call routes through this session
+    /// instead of letting lancedb spin up a fresh default — the
+    /// hook that lets a custom `lance_core::cache::CacheBackend`
+    /// (or any other session-level state) follow Firn's
+    /// connections. `None` preserves the historical behaviour.
+    session: Option<Arc<lancedb::Session>>,
 }
 
 impl NamespaceManager {
@@ -207,7 +214,39 @@ impl NamespaceManager {
             schema_info: DashMap::new(),
             handles: DashMap::new(),
             metrics,
+            session: None,
         }
+    }
+
+    /// Attach a shared `lancedb::Session` (re-exported from
+    /// `lance::session::Session`) so subsequent `lancedb::connect`
+    /// calls route through it.
+    ///
+    /// The Session carries Lance's index-cache and metadata-cache
+    /// state, and is the only documented hook for installing a
+    /// custom `lance_core::cache::CacheBackend`. Build the session
+    /// once with [`lancedb::Session::with_index_cache_backend`]
+    /// (or any other constructor), pass it here, and the manager
+    /// will thread it into every connection — including ones
+    /// re-opened after a pool eviction (index build, compaction,
+    /// delete).
+    ///
+    /// Builder-style; chain on top of [`Self::new`]:
+    ///
+    /// ```ignore
+    /// let session = Arc::new(lancedb::Session::with_index_cache_backend(
+    ///     backend, 8 * 1024 * 1024, Arc::new(ObjectStoreRegistry::default())));
+    /// let manager = NamespaceManager::new(root, opts, metrics).with_session(session);
+    /// ```
+    ///
+    /// Passing the same session into multiple managers (or into a
+    /// later replacement manager pointed at the same storage root)
+    /// shares the underlying cache state — the session-level
+    /// purpose. The manager only takes ownership of the `Arc`
+    /// clone; the session itself stays caller-owned.
+    pub fn with_session(mut self, session: Arc<lancedb::Session>) -> Self {
+        self.session = Some(session);
+        self
     }
 
     /// The configured storage root. Exposed for diagnostics and
@@ -301,8 +340,12 @@ impl NamespaceManager {
     }
 
     async fn connect(&self, ns: &NamespaceId) -> Result<lancedb::Connection, FirnflowError> {
-        lancedb::connect(&self.uri(ns))
-            .storage_options(self.storage_options.clone())
+        let mut builder =
+            lancedb::connect(&self.uri(ns)).storage_options(self.storage_options.clone());
+        if let Some(session) = &self.session {
+            builder = builder.session(Arc::clone(session));
+        }
+        builder
             .execute()
             .await
             .map_err(|e| FirnflowError::Backend(format!("lancedb connect: {e}")))

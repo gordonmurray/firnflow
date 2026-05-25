@@ -22,6 +22,16 @@ license = "Apache-2.0"
 # rather than failing with "No object store provider found".
 lancedb = { version = "=0.29.0", features = ["aws", "gcs"] }
 lance = "=6.0.0"
+# Pulled in directly so the index-cache reachability probe can
+# implement `lance_core::cache::CacheBackend`. lancedb does not
+# re-export that trait, only `Session` and `ObjectStoreRegistry`.
+# Same exact-pin policy as lance / lancedb.
+lance-core = "=6.0.0"
+
+# Trait helper for the `CacheBackend` async-trait impl. Already
+# pulled in transitively by lance; named explicitly so our impl
+# does not depend on someone else's transitive choice.
+async-trait = "0.1"
 
 # Arrow — pinned to the major that lance 6.0.0 requires (^58).
 # lancedb 0.29.0's workspace pins arrow* = "58.0.0" exactly; matching
