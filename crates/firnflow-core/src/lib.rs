@@ -29,6 +29,6 @@ pub use query::{
     IndexRequest, QueryRequest, SemanticCacheRequest, DEFAULT_SEMANTIC_MIN_SIMILARITY,
 };
 pub use result::{ListOrder, ListPage, ListRow, QueryResult, QueryResultSet};
-pub use service::NamespaceService;
+pub use service::{NamespaceService, QueryCacheSource, QueryOutcome};
 pub use storage_root::{Scheme, StorageRoot};
 pub use vector::VectorKind;

@@ -11,3 +11,4 @@ firnflow-core = { path = "../firnflow-core" }
 tokio.workspace = true
 anyhow.workspace = true
 tempfile = "3"
+bincode.workspace = true

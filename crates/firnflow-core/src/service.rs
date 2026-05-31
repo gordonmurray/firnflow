@@ -29,6 +29,37 @@ use crate::query::{
 };
 use crate::{FirnflowError, NamespaceId, QueryResultSet};
 
+/// Where a query result came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryCacheSource {
+    /// The query ran against the underlying Lance backend.
+    Backend,
+    /// The exact result cache served the query.
+    ExactCache,
+    /// The semantic cache sidecar reused a nearby result set.
+    SemanticCache,
+}
+
+impl QueryCacheSource {
+    /// Stable header value used by the API's debug cache-source signal.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Backend => "backend",
+            Self::ExactCache => "exact_cache",
+            Self::SemanticCache => "semantic_cache",
+        }
+    }
+}
+
+/// Query results plus the cache/backend source used to produce them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryOutcome {
+    /// Ranked search results.
+    pub result: QueryResultSet,
+    /// Cache/backend source for observability and benchmarks.
+    pub cache_source: QueryCacheSource,
+}
+
 /// Service facade over [`NamespaceManager`] + [`NamespaceCache`] +
 /// [`SemanticCache`].
 pub struct NamespaceService {
@@ -154,6 +185,18 @@ impl NamespaceService {
         ns: &NamespaceId,
         req: &QueryRequest,
     ) -> Result<QueryResultSet, FirnflowError> {
+        Ok(self.query_with_cache_source(ns, req).await?.result)
+    }
+
+    /// Same read path as [`Self::query`], but returns the cache/backend
+    /// source used for this request. Intended for API debug headers and
+    /// benchmark harnesses; normal callers should keep using
+    /// [`Self::query`].
+    pub async fn query_with_cache_source(
+        &self,
+        ns: &NamespaceId,
+        req: &QueryRequest,
+    ) -> Result<QueryOutcome, FirnflowError> {
         let start = Instant::now();
         validate_semantic_cache_request(req)?;
 
@@ -165,7 +208,10 @@ impl NamespaceService {
             let decoded = decode_payload(&bytes)?;
             self.metrics
                 .record_query(ns, classify_query_type(req), start.elapsed().as_secs_f64());
-            return Ok(decoded);
+            return Ok(QueryOutcome {
+                result: decoded,
+                cache_source: QueryCacheSource::ExactCache,
+            });
         }
 
         // 2. Semantic sidecar — only when opt-in and eligible.
@@ -200,7 +246,10 @@ impl NamespaceService {
                             classify_query_type(req),
                             start.elapsed().as_secs_f64(),
                         );
-                        return Ok(decoded);
+                        return Ok(QueryOutcome {
+                            result: decoded,
+                            cache_source: QueryCacheSource::SemanticCache,
+                        });
                     }
                     SemanticLookup::Miss => {
                         self.metrics.record_semantic_cache_miss(ns);
@@ -243,7 +292,10 @@ impl NamespaceService {
 
         self.metrics
             .record_query(ns, classify_query_type(req), start.elapsed().as_secs_f64());
-        Ok(result)
+        Ok(QueryOutcome {
+            result,
+            cache_source: QueryCacheSource::Backend,
+        })
     }
 
     /// Build an IVF_PQ index on the namespace's vector column.

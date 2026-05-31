@@ -16,18 +16,21 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::header::CONTENT_TYPE;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use firnflow_core::{
     decode_list_cursor, FirnflowError, IndexRequest, ListOrder, ListPage, NamespaceId,
-    QueryRequest, QueryResultSet, UpsertRow as CoreUpsertRow, LIST_MAX_LIMIT,
+    QueryRequest, UpsertRow as CoreUpsertRow, LIST_MAX_LIMIT,
 };
 
 use crate::error::ApiError;
 use crate::state::AppState;
+
+const CACHE_SOURCE_REQUEST_HEADER: &str = "x-firn-debug-cache-source";
+const CACHE_SOURCE_RESPONSE_HEADER: &str = "x-firn-cache-source";
 
 /// Body of a successful delete response.
 #[derive(Debug, Serialize)]
@@ -134,11 +137,24 @@ pub async fn upsert(
 pub async fn query(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<QueryRequest>,
-) -> Result<Json<QueryResultSet>, ApiError> {
+) -> Result<Response, ApiError> {
     let ns = NamespaceId::new(namespace)?;
-    let result = state.service.query(&ns, &req).await?;
-    Ok(Json(result))
+    let include_cache_source = headers
+        .get(CACHE_SOURCE_REQUEST_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| matches!(value, "1" | "true" | "yes"));
+    let outcome = state.service.query_with_cache_source(&ns, &req).await?;
+    let cache_source = outcome.cache_source.as_str();
+    let mut response = Json(outcome.result).into_response();
+    if include_cache_source {
+        response.headers_mut().insert(
+            CACHE_SOURCE_RESPONSE_HEADER,
+            HeaderValue::from_static(cache_source),
+        );
+    }
+    Ok(response)
 }
 
 /// Delete a namespace: remove every S3 object under its prefix and

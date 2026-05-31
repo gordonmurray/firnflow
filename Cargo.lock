@@ -2566,6 +2566,7 @@ name = "firnflow-bench"
 version = "0.7.1"
 dependencies = [
  "anyhow",
+ "bincode 2.0.1",
  "firnflow-core",
  "tempfile",
  "tokio",

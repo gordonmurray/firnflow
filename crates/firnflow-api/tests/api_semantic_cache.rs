@@ -15,7 +15,7 @@
 //! minio-init`.
 
 use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use firnflow_api::router;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -31,21 +31,32 @@ async fn build_app() -> (axum::Router, firnflow_api::AppState, tempfile::TempDir
 }
 
 async fn post_json(app: axum::Router, uri: String, body: Value) -> (StatusCode, Value) {
+    let (status, _, json) = post_json_debug(app, uri, body).await;
+    (status, json)
+}
+
+async fn post_json_debug(
+    app: axum::Router,
+    uri: String,
+    body: Value,
+) -> (StatusCode, HeaderMap, Value) {
     let request = Request::builder()
         .method("POST")
         .uri(uri)
         .header("content-type", "application/json")
+        .header("x-firn-debug-cache-source", "true")
         .body(Body::from(body.to_string()))
         .unwrap();
     let response = app.oneshot(request).await.unwrap();
     let status = response.status();
+    let headers = response.headers().clone();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json = if bytes.is_empty() {
         Value::Null
     } else {
         serde_json::from_slice(&bytes).unwrap()
     };
-    (status, json)
+    (status, headers, json)
 }
 
 async fn get_metrics_body(app: axum::Router) -> String {
@@ -102,9 +113,30 @@ async fn api_semantic_cache_near_duplicate_hits_and_metric_ticks() {
         "k": 4,
         "semantic_cache": {"enabled": true, "min_similarity": 0.95},
     });
-    let (status, first) = post_json(app.clone(), format!("/ns/{ns}/query"), seed).await;
+    let (status, headers, first) =
+        post_json_debug(app.clone(), format!("/ns/{ns}/query"), seed.clone()).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("x-firn-cache-source")
+            .and_then(|h| h.to_str().ok()),
+        Some("backend")
+    );
     assert_eq!(first["results"].as_array().unwrap().len(), 4);
+
+    // Identical repeat should short-circuit through the exact cache,
+    // and the debug header should report that source without changing
+    // the JSON body.
+    let (status, headers, repeat) =
+        post_json_debug(app.clone(), format!("/ns/{ns}/query"), seed).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("x-firn-cache-source")
+            .and_then(|h| h.to_str().ok()),
+        Some("exact_cache")
+    );
+    assert_eq!(repeat["results"], first["results"]);
 
     // Near-duplicate opt-in query — should reuse the cached top-k
     // and tick the semantic-hit metric.
@@ -113,8 +145,15 @@ async fn api_semantic_cache_near_duplicate_hits_and_metric_ticks() {
         "k": 4,
         "semantic_cache": {"enabled": true, "min_similarity": 0.95},
     });
-    let (status, reuse) = post_json(app.clone(), format!("/ns/{ns}/query"), probe).await;
+    let (status, headers, reuse) =
+        post_json_debug(app.clone(), format!("/ns/{ns}/query"), probe).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("x-firn-cache-source")
+            .and_then(|h| h.to_str().ok()),
+        Some("semantic_cache")
+    );
     assert_eq!(
         reuse["results"], first["results"],
         "semantic hit should reuse the seed query's top-k bytes",
