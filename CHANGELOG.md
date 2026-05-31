@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-31
+
 ### Added
 - **Opt-in semantic cache.** `POST /ns/{ns}/query` now accepts a `semantic_cache: { "enabled": true, "min_similarity": 0.995 }` block. When set, a query that misses the exact result cache will look for a previous query against the same namespace generation whose vector is within `min_similarity` cosine of the incoming one and whose surrounding shape (`k`, `nprobes`) matches; if found, the cached top-k bytes are reused. The default behaviour is unchanged — requests without the field, or with `enabled: false`, only short-circuit on exact-cache hits. v1 only applies to single-vector queries with no text/filters; multivector, FTS, and hybrid queries with the field enabled return 400 with a clear error. The default cosine threshold is 0.995; per-request overrides must lie in `(0.0, 1.0]`.
 - `firnflow_semantic_cache_hits_total{namespace}`, `firnflow_semantic_cache_misses_total{namespace}`, and `firnflow_semantic_cache_rejections_total{namespace, reason}` Prometheus counters expose semantic-layer behaviour. `reason` is one of `unsupported_query_shape` or `empty_index` — bounded set so cardinality stays manageable.
@@ -166,7 +168,8 @@ development through phases 1 through 8 before being made public;
   benchmark at dim=1536, 100k rows available at
   `bench/results/cold_vs_warm_aws.md`.
 
-[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/gordonmurray/firnflow/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/gordonmurray/firnflow/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/gordonmurray/firnflow/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/gordonmurray/firnflow/compare/v0.5.0...v0.6.0
