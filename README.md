@@ -1,8 +1,8 @@
 # Firn
 
-**Firn** is a high-performance, multi-tenant vector and full-text search engine backed by object storage (AWS S3, MinIO, Cloudflare R2, Tigris, DigitalOcean Spaces, Google Cloud Storage). It is designed as a credible open-source alternative to turbopuffer, proving that a professional-grade tiered storage architecture (**RAM → NVMe → object storage**) is achievable entirely from open-source components. See [Storage backends](#storage-backends) for the full compatibility matrix.
+**Firn** is a multi-tenant vector and full-text search engine backed by object storage (AWS S3, MinIO, Cloudflare R2, Tigris, DigitalOcean Spaces, Google Cloud Storage). It is designed as a credible open-source alternative to turbopuffer, showing that a tiered storage architecture (**RAM → NVMe → object storage**) can be built entirely from open-source components. See [Storage backends](#storage-backends) for the full compatibility matrix.
 
-A multi-tenant vector and full-text search engine backed by any S3-compatible bucket or native Google Cloud Storage. Built on LanceDB and foyer: your data lives on cheap object storage, and a tiered RAM + NVMe cache serves repeated queries without a backend round-trip.
+It pairs LanceDB (vector and BM25 search that runs directly on object storage) with foyer (a RAM + NVMe cache), so your data sits on cheap object storage while repeated queries are served from cache without a backend round-trip.
 
 ## Performance
 
@@ -15,10 +15,11 @@ Benchmarked at 100,000 vectors of 1536 dimensions (OpenAI embedding size) agains
 | Warm (byte-identical repeat, served from cache) | ~72 µs |
 | End-to-end HTTP, warm | < 5 ms |
 
-Two numbers decide whether Firn fits your workload, so it is worth being exact about them:
+Two numbers decide whether Firn fits your workload:
 
 *   **The IVF_PQ index is what makes search on object storage practical.** With no index every query is a brute-force scan at ~25 s; with one, a cold query is ~979 ms. Build the index (`POST /ns/{ns}/index`) after your first batch of writes.
 *   **The cache accelerates queries that repeat, not queries that are new.** A warm hit is a byte-identical repeat of an earlier query against the same namespace generation. It returns in microseconds and, once the namespace's handle is warm, makes zero backend requests. A query Firn has not seen before misses the result cache and pays the cold cost above. See [What the cache does and does not do](#what-the-cache-does-and-does-not-do).
+*   **Near-duplicate queries can skip the backend too.** The opt-in [semantic cache](#opt-in-semantic-cache) reuses a recent result when an incoming query vector is close enough, so paraphrases of the same search return from memory instead of re-running against the backend. The reused result is approximate, not a fresh search, which is why it is opt-in.
 
 ## What the cache does and does not do
 
@@ -36,7 +37,7 @@ Cold query, warm query, full-text search, and cache proof, all in 60 seconds. Th
 
 **Firn** is built on a "Tiered Storage" philosophy:
 
-1.  **L1: RAM Cache** (via foyer): Sub-microsecond access for the most frequent queries.
+1.  **L1: RAM Cache** (via foyer): Microsecond-scale reads for the most frequent queries.
 2.  **L2: NVMe Cache** (via foyer): Fast, durable cache for high-volume search results.
 3.  **L3: Object Storage** (via LanceDB on AWS S3 / MinIO / R2 / Tigris / Spaces / native GCS): The "Source of Truth" where every namespace is isolated under its own object-storage prefix.
 
@@ -130,10 +131,10 @@ Use `gs://...` rather than reaching for the GCS S3-interop endpoint — the inte
 ## Features
 
 *   **Multi-tenant by Design:** Each namespace maps to an isolated object-storage prefix under the configured `FIRNFLOW_STORAGE_URI` (e.g. `s3://bucket/namespace/` or `gs://bucket/namespace/`) with near-zero idle cost.
-*   **Instant Invalidation:** A "Generation Counter" strategy ensures that after a write, all stale search results for that namespace are invalidated in $O(1)$ time.
+*   **Instant Invalidation:** Cached results are keyed on the Lance table version, so a write advances the version and makes that namespace's stale results unreachable in $O(1)$ time, with no separate bookkeeping.
 *   **CAS Consistency:** Verified concurrency safety using the backend's conditional-write primitive — `If-None-Match: *` for S3-family backends, the generation precondition for native GCS — to prevent data loss when multiple writers fight for the same bucket.
 *   **Late-Interaction Search:** Each namespace is either single-vector (one dense vector per row) or multivector (a bag of small vectors per row, scored via MaxSim). The multivector shape is what ColBERT, ColPali, and ColQwen2 produce, and is what compositional queries like *"a man with a logo on his shirt"* need to match each element independently. See [Multivector namespaces](#multivector-namespaces) below.
-*   **Zero-Copy Ready:** Optimized serialization via `bincode` (with architectural triggers to move to `rkyv` if needed).
+*   **Compact Serialization:** Query results are serialized with `bincode`, with a path to `rkyv` if a workload needs zero-copy.
 *   **Operational Excellence:** Native Prometheus metrics tracking cache hit rates and backend request count (the primary signal for cost savings).
 
 ## Quickstart
