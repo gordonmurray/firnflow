@@ -170,4 +170,16 @@ impl NamespaceCache {
     pub fn generation_counter(&self) -> Arc<GenerationCounter> {
         Arc::clone(&self.generations)
     }
+
+    /// Flush the NVMe write buffer and shut the cache down cleanly.
+    ///
+    /// Delegates to foyer's graceful shutdown so entries inserted before
+    /// the call are durable on disk. The cache must not be used after
+    /// this returns.
+    pub async fn close(&self) -> Result<(), FirnflowError> {
+        self.cache
+            .close()
+            .await
+            .map_err(|e| FirnflowError::Cache(format!("cache close: {e}")))
+    }
 }
