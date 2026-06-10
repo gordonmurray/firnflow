@@ -9,13 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `NamespaceCache::close()` flushes the foyer NVMe write buffer and shuts the cache down cleanly, so entries inserted before the call are durable on disk. Groundwork for graceful shutdown (#13).
-- `NamespaceManager::generation()` returns a namespace's current Lance table version, and `NamespaceCache::set_generation()` seeds the shared generation counter from it. The query read path now derives the cache key's generation from this persistent version rather than a process-local counter (see Fixed).
+- `NamespaceManager::generation()` returns a namespace's cache generation, derived from its Lance table version and the manifest commit timestamp, and `NamespaceCache::set_generation()` seeds the shared generation counter from it. The query read path now derives the cache key's generation from this persistent value rather than a process-local counter (see Fixed).
 
 ### Changed
 - Building an index (IVF_PQ, FTS, or scalar BTree) now invalidates a namespace's cached query results. An index build is a Lance commit that advances the table version, which is the cache generation, so post-build queries re-run against the new index instead of replaying a pre-index cached result. Previously index builds left the cache untouched. Index builds are infrequent and operator-triggered, so dropping the warm cache afterwards is a minor cost for the safer behaviour.
 
 ### Fixed
-- The result cache could serve stale results after a process restart. The per-namespace generation counter that keys cached entries lived only in memory and reset to 0 on restart, while the foyer NVMe tier persists and recovers its entries on reopen — so a repeat query at a replayed generation could be served a result from before a write that had already bumped the generation. The generation is now derived from the Lance table version, a persistent value that advances on every commit, so a recovered NVMe entry is reachable only when the namespace has not changed since the entry was stored. Reproduced by `crates/firnflow-core/tests/cache_restart_staleness.rs`.
+- The result cache could serve stale results after a process restart. The per-namespace generation counter that keys cached entries lived only in memory and reset to 0 on restart, while the foyer NVMe tier persists and recovers its entries on reopen — so a repeat query at a replayed generation could be served a result from before a write that had already bumped the generation. The generation is now derived from the Lance table version, a persistent value that advances on every commit, so a recovered NVMe entry is reachable only when the namespace has not changed since the entry was stored. The generation also folds in the manifest commit timestamp, so deleting a namespace and recreating it under the same name cannot serve the deleted incarnation's cached results even when the new incarnation reaches the same Lance version. Reproduced by `crates/firnflow-core/tests/cache_restart_staleness.rs` and `tests/service_cache_aside.rs::delete_recreate_does_not_serve_old_incarnation`.
 
 ## [0.8.0] - 2026-05-31
 

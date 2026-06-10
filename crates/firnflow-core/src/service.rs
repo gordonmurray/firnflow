@@ -149,18 +149,15 @@ impl NamespaceService {
     ///
     /// Removing the Lance table drops the namespace back to "no table"
     /// (generation 0 on the next read), so results cached against the
-    /// deleted table become unreachable. The semantic sidecar is
+    /// deleted table become unreachable. Recreating the namespace under
+    /// the same name is safe even though its Lance version restarts at
+    /// 1: the cache generation folds in the manifest commit timestamp
+    /// (see [`NamespaceManager::generation`](crate::NamespaceManager::generation)),
+    /// so the recreated incarnation keys differently from the deleted
+    /// one and cannot re-serve its cached bytes. The semantic sidecar is
     /// cleared eagerly. A failed delete leaves the cache serving the
     /// pre-delete entries, self-consistent with the data still sitting
     /// in object storage.
-    ///
-    /// Known edge: recreating a namespace with the same name within the
-    /// same process restarts its Lance version at 1, so a result cached
-    /// against the *deleted* incarnation at some version `v` could be
-    /// re-served if the new incarnation reaches the same `v` with an
-    /// identical query before that foyer entry is reclaimed. This is no
-    /// worse than the pre-fix restart behaviour and is tracked as a
-    /// follow-up; avoid immediately reusing a deleted namespace name.
     ///
     /// Returns the number of objects the manager removed.
     pub async fn delete(&self, ns: &NamespaceId) -> Result<usize, FirnflowError> {

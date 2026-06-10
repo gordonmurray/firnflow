@@ -202,3 +202,96 @@ async fn service_cache_aside_follows_table_version() {
          step 4, and the new row from step 6"
     );
 }
+
+/// Deleting a namespace and recreating it under the same name must not
+/// serve the deleted incarnation's cached results, even when the new
+/// incarnation reaches the same Lance version. The generation folds in
+/// the manifest commit timestamp, so the two incarnations key
+/// differently. Regression for the delete/recreate collision.
+#[tokio::test]
+#[ignore]
+async fn delete_recreate_does_not_serve_old_incarnation() {
+    let bucket = env_or("FIRNFLOW_S3_BUCKET", "firnflow-test");
+    let tmp = tempfile::tempdir().unwrap();
+    let metrics = test_metrics();
+    let manager = Arc::new(NamespaceManager::new(
+        StorageRoot::s3_bucket(&bucket).unwrap(),
+        minio_options(),
+        Arc::clone(&metrics),
+    ));
+    let cache = Arc::new(
+        NamespaceCache::new(
+            16 * 1024 * 1024,
+            tmp.path(),
+            64 * 1024 * 1024,
+            Arc::clone(&metrics),
+        )
+        .await
+        .expect("build cache"),
+    );
+    let service = NamespaceService::new(
+        Arc::clone(&manager),
+        Arc::clone(&cache),
+        Arc::clone(&metrics),
+    );
+
+    let ns = NamespaceId::new(unique_namespace("recreate")).unwrap();
+    let req = QueryRequest {
+        vector: unit_vector(0),
+        vectors: None,
+        k: 10,
+        nprobes: None,
+        text: None,
+        semantic_cache: None,
+    };
+
+    // --- Incarnation A: one row, then cache the query result. ---
+    service
+        .upsert(&ns, vec![UpsertRow::from((1, unit_vector(0)))])
+        .await
+        .expect("upsert A");
+    let a = service.query(&ns, &req).await.expect("query A");
+    assert_eq!(a.results.len(), 1, "incarnation A has one row");
+    let a_hit = service
+        .query_with_cache_source(&ns, &req)
+        .await
+        .expect("query A repeat");
+    assert_eq!(
+        a_hit.cache_source,
+        QueryCacheSource::ExactCache,
+        "incarnation A's result is cached before the delete"
+    );
+
+    // --- Delete, then recreate under the same name with different data.
+    //     Incarnation B reaches the same Lance version as A (create +
+    //     one upsert = version 2) but holds two different rows. ---
+    service.delete(&ns).await.expect("delete");
+    service
+        .upsert(
+            &ns,
+            vec![
+                UpsertRow::from((2, unit_vector(1))),
+                UpsertRow::from((3, unit_vector(2))),
+            ],
+        )
+        .await
+        .expect("upsert B");
+
+    // The same query must miss: the recreated incarnation keys
+    // differently from the deleted one despite the identical version.
+    let b = service
+        .query_with_cache_source(&ns, &req)
+        .await
+        .expect("query B");
+    assert_eq!(
+        b.cache_source,
+        QueryCacheSource::Backend,
+        "recreated namespace must miss the cache, not serve the deleted \
+         incarnation's bytes"
+    );
+    assert_eq!(
+        b.result.results.len(),
+        2,
+        "must reflect incarnation B's two rows, not incarnation A's one row"
+    );
+}

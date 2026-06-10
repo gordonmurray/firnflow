@@ -55,6 +55,7 @@ use object_store::aws::AmazonS3Builder;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::path::Path as ObjectStorePath;
 use object_store::ObjectStore;
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::metrics::CoreMetrics;
 use crate::query::DEFAULT_NPROBES;
@@ -242,47 +243,66 @@ impl NamespaceManager {
         self.schema_info.get(ns).map(|r| r.has_ingested_at)
     }
 
-    /// Current cache generation for a namespace: the Lance table
-    /// version.
+    /// Current cache generation for a namespace: a deterministic hash
+    /// over the Lance manifest's `version` and commit `timestamp_nanos`.
     ///
-    /// The version advances on every commit — append, delete, index
-    /// build, compaction — and is persisted in the table manifest, so
-    /// it is identical across process restarts and across replicas
-    /// reading the same bucket. The result cache keys on this value so
-    /// a recovered NVMe entry is never served once the table it was
-    /// computed against has moved on.
+    /// The version advances on every commit (append, delete, index
+    /// build, compaction) and is persisted in the manifest, so it
+    /// survives a process restart — that is what stops a recovered NVMe
+    /// entry being served after a write. The commit timestamp is folded
+    /// in so that two incarnations of a namespace which reach the same
+    /// version after a delete-and-recreate still key differently: a
+    /// result cached against the deleted incarnation cannot be re-served
+    /// to the new one.
+    ///
+    /// This reflects only the version this process's handle has
+    /// observed. It is read from the cached handle without a
+    /// `checkout_latest`, so it does not necessarily see commits made by
+    /// another process; multi-replica cache coherence is out of scope
+    /// and Firn assumes a single replica per bucket.
     ///
     /// Returns `0` for a namespace that has no table yet (nothing has
-    /// been written). Lance table versions start at 1, so `0` can
-    /// never collide with a real version.
+    /// been written), which can never collide with a real generation.
     ///
-    /// Cheap on the hot path: when the namespace has a pooled handle,
-    /// `Table::version()` is an in-memory manifest read with no
-    /// object-store round-trip. A cold namespace pays one table-open —
-    /// the same cost a backend query would incur — and the handle is
-    /// then pooled. Never creates a table: a query against a
-    /// never-written namespace must not materialise one.
+    /// Cheap on the hot path: with a pooled handle the manifest is read
+    /// in memory with no object-store round-trip. A cold namespace pays
+    /// one table-open — the same cost a backend query would incur — and
+    /// the handle is then pooled. Never creates a table: a query against
+    /// a never-written namespace must not materialise one.
     pub async fn generation(&self, ns: &NamespaceId) -> Result<u64, FirnflowError> {
-        // Warm pool: read the version straight off the cached handle.
+        // Warm pool: read the manifest straight off the cached handle.
         // Clone the handle and drop the map guard before awaiting so we
         // never hold a DashMap reference across an `.await`.
         if let Some(entry) = self.handles.get(ns) {
             let tbl = entry.table.clone();
             drop(entry);
-            return tbl
-                .version()
-                .await
-                .map_err(|e| FirnflowError::Backend(format!("table.version: {e}")));
+            return Self::generation_of(&tbl).await;
         }
         // Cold: open the table if it exists (caching the handle), else
         // report generation 0 without creating anything.
         match self.open_existing(ns).await? {
-            Some((tbl, _info)) => tbl
-                .version()
-                .await
-                .map_err(|e| FirnflowError::Backend(format!("table.version: {e}"))),
+            Some((tbl, _info)) => Self::generation_of(&tbl).await,
             None => Ok(0),
         }
+    }
+
+    /// Hash an open table's manifest `(version, timestamp_nanos)` into a
+    /// `u64` cache generation. Both fields live in the in-memory
+    /// manifest, so on a warm handle this is an in-memory read.
+    async fn generation_of(tbl: &lancedb::Table) -> Result<u64, FirnflowError> {
+        let dataset = tbl
+            .dataset()
+            .ok_or_else(|| {
+                FirnflowError::Backend("generation requires a native lance table".into())
+            })?
+            .get()
+            .await
+            .map_err(|e| FirnflowError::Backend(format!("resolve dataset: {e}")))?;
+        let manifest = dataset.manifest();
+        let mut buf = [0u8; 24];
+        buf[..8].copy_from_slice(&manifest.version.to_le_bytes());
+        buf[8..].copy_from_slice(&manifest.timestamp_nanos.to_le_bytes());
+        Ok(xxh3_64(&buf))
     }
 
     /// Number of namespaces currently holding a pooled
