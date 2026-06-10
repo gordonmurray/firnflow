@@ -11,6 +11,7 @@
 //! * `POST   /ns/{namespace}/fts-index`
 //! * `POST   /ns/{namespace}/scalar-index`
 //! * `POST   /ns/{namespace}/compact`
+//! * `GET    /operations/{operation_id}`
 //! * `GET    /metrics`
 
 use std::sync::Arc;
@@ -28,6 +29,7 @@ use firnflow_core::{
 };
 
 use crate::error::ApiError;
+use crate::operations::{OperationKind, OperationRecord, OperationStatus};
 use crate::state::AppState;
 
 const CACHE_SOURCE_REQUEST_HEADER: &str = "x-firn-debug-cache-source";
@@ -51,13 +53,29 @@ pub struct WarmupRequest {
     pub queries: Vec<QueryRequest>,
 }
 
-/// Body of a successful warmup response (HTTP 202 Accepted). The
-/// number is how many queries the background task was *asked*
-/// to run, not how many actually succeeded by the time the
-/// response is returned — the task runs after the response is
-/// sent.
+/// Body of the `202 Accepted` returned by every endpoint that starts
+/// background work. The `operation_id` is an opaque, pollable handle;
+/// fetch its current state from `GET /operations/{operation_id}`.
 #[derive(Debug, Serialize)]
-pub struct WarmupResponse {
+pub struct OperationAccepted {
+    /// Opaque handle for the background work; poll it for status.
+    pub operation_id: String,
+    /// What kind of operation was started.
+    pub kind: OperationKind,
+    /// Namespace the work targets.
+    pub namespace: String,
+    /// Lifecycle state at acceptance time (always `running` in v1).
+    pub status: OperationStatus,
+}
+
+/// Warmup's `202` body: the standard operation handle plus the number
+/// of queries the background task was asked to run (not how many had
+/// completed by the time the response was sent).
+#[derive(Debug, Serialize)]
+pub struct WarmupAccepted {
+    #[serde(flatten)]
+    pub operation: OperationAccepted,
+    /// Number of queries the background task was asked to run.
     pub queued: usize,
 }
 
@@ -186,14 +204,23 @@ pub async fn warmup(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
     Json(req): Json<WarmupRequest>,
-) -> Result<(StatusCode, Json<WarmupResponse>), ApiError> {
+) -> Result<(StatusCode, Json<WarmupAccepted>), ApiError> {
     let ns = NamespaceId::new(namespace)?;
     let queued = req.queries.len();
 
+    let operation_id = state
+        .operations
+        .start(OperationKind::Warmup, ns.to_string());
+
     let service = Arc::clone(&state.service);
+    let operations = Arc::clone(&state.operations);
     let ns_owned = ns.clone();
     let queries = req.queries;
+    let op_for_task = operation_id.clone();
     tokio::spawn(async move {
+        let total = queries.len();
+        let mut failures = 0usize;
+        let mut first_error: Option<String> = None;
         for (idx, query) in queries.iter().enumerate() {
             if let Err(e) = service.query(&ns_owned, query).await {
                 tracing::warn!(
@@ -202,32 +229,56 @@ pub async fn warmup(
                     error = %e,
                     "warmup query failed"
                 );
+                failures += 1;
+                if first_error.is_none() {
+                    first_error = Some(operation_error_message(&e));
+                }
             }
+        }
+        // Every query is attempted regardless of individual failures, but
+        // the operation only reports `succeeded` if all of them warmed. If
+        // any failed it reports `failed` with a count and the first
+        // message, so a poller does not read `succeeded` when nothing was
+        // actually cached.
+        if failures == 0 {
+            operations.succeed(&op_for_task);
+        } else {
+            operations.fail(
+                &op_for_task,
+                format!(
+                    "{failures} of {total} warmup queries failed; first error: {}",
+                    first_error.unwrap_or_else(|| "operation failed".into())
+                ),
+            );
         }
     });
 
-    Ok((StatusCode::ACCEPTED, Json(WarmupResponse { queued })))
-}
-
-/// Body of a successful index build response (HTTP 202 Accepted).
-#[derive(Debug, Serialize)]
-pub struct IndexResponse {
-    /// Confirmation that the build was queued.
-    pub status: String,
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(WarmupAccepted {
+            operation: OperationAccepted {
+                operation_id,
+                kind: OperationKind::Warmup,
+                namespace: ns.to_string(),
+                status: OperationStatus::Running,
+            },
+            queued,
+        }),
+    ))
 }
 
 /// Explicit ANN index build.
 ///
 /// Spawns a background task that builds an IVF_PQ index on the
-/// namespace's vector column and returns `202 Accepted` immediately.
-/// Same fire-and-forget pattern as warmup. Operators monitor the
-/// `firnflow_index_build_duration_seconds` histogram to know when
-/// the build completes.
+/// namespace's vector column and returns `202 Accepted` with an
+/// `operation_id`. Poll `GET /operations/{operation_id}` for
+/// completion, or watch the `firnflow_index_build_duration_seconds`
+/// histogram.
 pub async fn create_index(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
     Json(req): Json<IndexRequest>,
-) -> Result<(StatusCode, Json<IndexResponse>), ApiError> {
+) -> Result<(StatusCode, Json<OperationAccepted>), ApiError> {
     let ns = NamespaceId::new(namespace)?;
 
     if req.kind != "ivf_pq" {
@@ -247,10 +298,14 @@ pub async fn create_index(
     firnflow_core::validate_ivf_pq_options(req.num_bits, req.num_sub_vectors)
         .map_err(ApiError::Core)?;
 
+    let operation_id = state.operations.start(OperationKind::Index, ns.to_string());
+
     let service = Arc::clone(&state.service);
+    let operations = Arc::clone(&state.operations);
     let ns_owned = ns.clone();
+    let op_for_task = operation_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = service
+        match service
             .create_index(
                 &ns_owned,
                 req.num_partitions,
@@ -259,54 +314,75 @@ pub async fn create_index(
             )
             .await
         {
-            tracing::error!(
-                namespace = %ns_owned,
-                error = %e,
-                "index build failed"
-            );
+            Ok(()) => operations.succeed(&op_for_task),
+            Err(e) => {
+                tracing::error!(
+                    namespace = %ns_owned,
+                    error = %e,
+                    "index build failed"
+                );
+                operations.fail(&op_for_task, operation_error_message(&e));
+            }
         }
     });
 
     Ok((
         StatusCode::ACCEPTED,
-        Json(IndexResponse {
-            status: "index build queued".into(),
+        Json(OperationAccepted {
+            operation_id,
+            kind: OperationKind::Index,
+            namespace: ns.to_string(),
+            status: OperationStatus::Running,
         }),
     ))
 }
 
 /// Build a BM25 full-text search index on the namespace's `text`
-/// column. Same 202-async pattern as vector index build.
+/// column. Same 202-with-`operation_id` pattern as the vector index
+/// build; poll `GET /operations/{operation_id}` for completion.
 pub async fn create_fts_index(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
-) -> Result<(StatusCode, Json<IndexResponse>), ApiError> {
+) -> Result<(StatusCode, Json<OperationAccepted>), ApiError> {
     let ns = NamespaceId::new(namespace)?;
 
+    let operation_id = state
+        .operations
+        .start(OperationKind::FtsIndex, ns.to_string());
+
     let service = Arc::clone(&state.service);
+    let operations = Arc::clone(&state.operations);
     let ns_owned = ns.clone();
+    let op_for_task = operation_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = service.create_fts_index(&ns_owned).await {
-            tracing::error!(
-                namespace = %ns_owned,
-                error = %e,
-                "FTS index build failed"
-            );
+        match service.create_fts_index(&ns_owned).await {
+            Ok(()) => operations.succeed(&op_for_task),
+            Err(e) => {
+                tracing::error!(
+                    namespace = %ns_owned,
+                    error = %e,
+                    "FTS index build failed"
+                );
+                operations.fail(&op_for_task, operation_error_message(&e));
+            }
         }
     });
 
     Ok((
         StatusCode::ACCEPTED,
-        Json(IndexResponse {
-            status: "fts index build queued".into(),
+        Json(OperationAccepted {
+            operation_id,
+            kind: OperationKind::FtsIndex,
+            namespace: ns.to_string(),
+            status: OperationStatus::Running,
         }),
     ))
 }
 
-/// Build a BTree scalar index on `_ingested_at`. Same 202-async
-/// pattern as `/fts-index`. The build runs in a tokio task; operators
-/// monitor `firnflow_index_build_duration_seconds{kind="scalar"}` for
-/// completion.
+/// Build a BTree scalar index on `_ingested_at`. Same
+/// 202-with-`operation_id` pattern as `/fts-index`; poll
+/// `GET /operations/{operation_id}` for completion, or watch
+/// `firnflow_index_build_duration_seconds{kind="scalar"}`.
 ///
 /// v1 hardcodes the column to `_ingested_at` to mirror the same
 /// constraint `/list` puts on `order_by`. Future user-column ordering
@@ -314,50 +390,62 @@ pub async fn create_fts_index(
 pub async fn create_scalar_index(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
-) -> Result<(StatusCode, Json<IndexResponse>), ApiError> {
+) -> Result<(StatusCode, Json<OperationAccepted>), ApiError> {
     let ns = NamespaceId::new(namespace)?;
 
+    let operation_id = state
+        .operations
+        .start(OperationKind::ScalarIndex, ns.to_string());
+
     let service = Arc::clone(&state.service);
+    let operations = Arc::clone(&state.operations);
     let ns_owned = ns.clone();
+    let op_for_task = operation_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = service.create_scalar_index(&ns_owned, "_ingested_at").await {
-            tracing::error!(
-                namespace = %ns_owned,
-                error = %e,
-                "scalar index build failed"
-            );
+        match service.create_scalar_index(&ns_owned, "_ingested_at").await {
+            Ok(()) => operations.succeed(&op_for_task),
+            Err(e) => {
+                tracing::error!(
+                    namespace = %ns_owned,
+                    error = %e,
+                    "scalar index build failed"
+                );
+                operations.fail(&op_for_task, operation_error_message(&e));
+            }
         }
     });
 
     Ok((
         StatusCode::ACCEPTED,
-        Json(IndexResponse {
-            status: "scalar index build queued".into(),
+        Json(OperationAccepted {
+            operation_id,
+            kind: OperationKind::ScalarIndex,
+            namespace: ns.to_string(),
+            status: OperationStatus::Running,
         }),
     ))
 }
 
-/// Body of a successful compact response (HTTP 202 Accepted).
-#[derive(Debug, Serialize)]
-pub struct CompactResponse {
-    /// Confirmation that the compaction was queued.
-    pub status: String,
-}
-
 /// Explicit compaction.
 ///
-/// Spawns a background task that merges small data files into
-/// fewer, larger ones and returns `202 Accepted` immediately.
-/// Operators monitor the `firnflow_compaction_duration_seconds`
-/// histogram to know when the compaction completes.
+/// Spawns a background task that merges small data files into fewer,
+/// larger ones and returns `202 Accepted` with an `operation_id`. Poll
+/// `GET /operations/{operation_id}` for completion, or watch the
+/// `firnflow_compaction_duration_seconds` histogram.
 pub async fn compact(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
-) -> Result<(StatusCode, Json<CompactResponse>), ApiError> {
+) -> Result<(StatusCode, Json<OperationAccepted>), ApiError> {
     let ns = NamespaceId::new(namespace)?;
 
+    let operation_id = state
+        .operations
+        .start(OperationKind::Compact, ns.to_string());
+
     let service = Arc::clone(&state.service);
+    let operations = Arc::clone(&state.operations);
     let ns_owned = ns.clone();
+    let op_for_task = operation_id.clone();
     tokio::spawn(async move {
         match service.compact(&ns_owned).await {
             Ok(result) => {
@@ -367,6 +455,7 @@ pub async fn compact(
                     fragments_added = result.fragments_added,
                     "compaction complete"
                 );
+                operations.succeed(&op_for_task);
             }
             Err(e) => {
                 tracing::error!(
@@ -374,14 +463,18 @@ pub async fn compact(
                     error = %e,
                     "compaction failed"
                 );
+                operations.fail(&op_for_task, operation_error_message(&e));
             }
         }
     });
 
     Ok((
         StatusCode::ACCEPTED,
-        Json(CompactResponse {
-            status: "compaction queued".into(),
+        Json(OperationAccepted {
+            operation_id,
+            kind: OperationKind::Compact,
+            namespace: ns.to_string(),
+            status: OperationStatus::Running,
         }),
     ))
 }
@@ -478,6 +571,22 @@ pub async fn info(
     }
 }
 
+/// Return the current state of a background operation by its
+/// `operation_id` (returned in the 202 from warmup, index, fts-index,
+/// scalar-index, and compact). Returns 404 if the id is unknown or its
+/// record has been evicted from the bounded in-memory registry.
+pub async fn get_operation(
+    State(state): State<AppState>,
+    Path(operation_id): Path<String>,
+) -> Result<Json<OperationRecord>, ApiError> {
+    match state.operations.get(&operation_id) {
+        Some(record) => Ok(Json(record)),
+        None => Err(ApiError::NotFound(format!(
+            "operation {operation_id} not found"
+        ))),
+    }
+}
+
 /// Prometheus scrape endpoint. Serialises the process-wide
 /// [`CoreMetrics`] registry into the Prometheus text exposition
 /// format with a `text/plain; version=0.0.4` content type.
@@ -487,4 +596,57 @@ pub async fn metrics(State(state): State<AppState>) -> Result<impl IntoResponse,
         [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         body,
     ))
+}
+
+/// Map a background-task error to a concise, client-facing message for
+/// an operation record. This mirrors the synchronous API error policy
+/// in [`crate::error`]: validation and capability errors carry a
+/// caller-actionable message and are surfaced, while backend, cache,
+/// I/O, and metrics failures can embed storage or provider internals
+/// and are collapsed to a generic message. The full error is always
+/// preserved in the server logs via `tracing` at the call site.
+fn operation_error_message(err: &FirnflowError) -> String {
+    match err {
+        FirnflowError::InvalidNamespace(msg) => format!("invalid namespace: {msg}"),
+        FirnflowError::InvalidRequest(msg) => format!("invalid request: {msg}"),
+        FirnflowError::Unsupported(msg) => format!("unsupported: {msg}"),
+        FirnflowError::Backend(_)
+        | FirnflowError::Cache(_)
+        | FirnflowError::Io(_)
+        | FirnflowError::Metrics(_) => "operation failed".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn operation_error_message_surfaces_caller_errors() {
+        let msg = operation_error_message(&FirnflowError::Unsupported(
+            "namespace predates the _ingested_at column".into(),
+        ));
+        assert!(
+            msg.contains("namespace predates the _ingested_at column"),
+            "capability errors should reach the caller, got: {msg}"
+        );
+
+        let msg = operation_error_message(&FirnflowError::InvalidRequest(
+            "num_sub_vectors must divide the dimension".into(),
+        ));
+        assert!(msg.contains("num_sub_vectors must divide the dimension"));
+    }
+
+    #[test]
+    fn operation_error_message_scrubs_backend_internals() {
+        let leaky = FirnflowError::Backend(
+            "s3://secret-bucket/ns: AccessDenied request-id 0xDEADBEEF".into(),
+        );
+        let msg = operation_error_message(&leaky);
+        assert_eq!(msg, "operation failed");
+        assert!(
+            !msg.contains("secret-bucket"),
+            "backend internals must not leak into the operation record"
+        );
+    }
 }

@@ -8,6 +8,7 @@ use firnflow_core::{CoreMetrics, NamespaceManager, NamespaceService};
 
 use crate::auth::{AuthConfig, AuthState};
 use crate::config::AppConfig;
+use crate::operations::OperationRegistry;
 use crate::rate_limit::RateLimitSettings;
 
 /// Shared state every handler receives via `axum::extract::State`.
@@ -28,6 +29,10 @@ pub struct AppState {
     /// Shared metrics registry; the `/metrics` handler encodes
     /// this into the Prometheus text format.
     pub metrics: Arc<CoreMetrics>,
+    /// Registry of in-flight and recently-finished background
+    /// operations (index builds, compaction, warmup). Backs the
+    /// `GET /operations/{id}` status endpoint.
+    pub operations: Arc<OperationRegistry>,
     /// Auth + rate-limit configuration. `Arc` so middleware closures
     /// can share it without cloning the inner `Secret`s. Tests
     /// construct `AuthConfig::disabled()` (default-open) via
@@ -104,10 +109,13 @@ pub async fn build_state(cfg: &AppConfig) -> anyhow::Result<AppState> {
         Arc::clone(&metrics),
     ));
 
+    let operations = Arc::new(OperationRegistry::new());
+
     Ok(AppState {
         service,
         manager,
         metrics,
+        operations,
         auth: Arc::new(auth),
         rate_limit: cfg.rate_limit.clone(),
         max_body_bytes: cfg.max_body_bytes,

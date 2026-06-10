@@ -74,6 +74,9 @@ bincode = { version = "2", features = ["serde"] }
 # Concurrent collections.
 dashmap = "6"
 
+# Time-sortable opaque identifiers for background operation handles.
+uuid = { version = "1", features = ["v7"] }
+
 # Hashing.
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 

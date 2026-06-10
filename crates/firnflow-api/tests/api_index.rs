@@ -129,7 +129,13 @@ async fn index_build_returns_202_and_records_metric() {
         StatusCode::ACCEPTED,
         "index endpoint must return 202"
     );
-    assert_eq!(body["status"], "index build queued");
+    assert!(
+        body["operation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("op_")),
+        "202 should carry an operation id: {body}"
+    );
+    assert_eq!(body["status"], "running");
 
     // 3. Wait for the background task to complete by polling the
     //    index_build_duration histogram count.

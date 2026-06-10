@@ -25,6 +25,8 @@ tower.workspace = true
 tower_governor.workspace = true
 governor.workspace = true
 subtle.workspace = true
+dashmap.workspace = true
+uuid.workspace = true
 firnflow-core = { path = "../firnflow-core" }
 
 [dev-dependencies]

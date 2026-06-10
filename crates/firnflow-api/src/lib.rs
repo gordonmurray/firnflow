@@ -9,6 +9,7 @@
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod operations;
 pub mod rate_limit;
 pub mod state;
 
@@ -37,8 +38,9 @@ pub use state::{build_state, AppState};
 ///   [`auth::require_metrics_token`], which short-circuits when no
 ///   `FIRNFLOW_METRICS_TOKEN` is configured (preserving the
 ///   pre-0.5.0 default-public behaviour).
-/// * **Read/Write** — `upsert`, `query`, `list`, `warmup`, and the
-///   `GET /ns/{namespace}` metadata endpoint. Stacks
+/// * **Read/Write** — `upsert`, `query`, `list`, `warmup`, the
+///   `GET /ns/{namespace}` metadata endpoint, and the
+///   `GET /operations/{id}` background-operation status endpoint. Stacks
 ///   `require_write` and the per-principal limiter inside a single
 ///   `ServiceBuilder` so the limiter sees the `Principal` extension
 ///   that auth attaches.
@@ -74,7 +76,10 @@ pub fn router(state: AppState) -> Router {
         // GET /ns/{namespace} (namespace metadata) shares its path with
         // the admin-tier DELETE; axum merges the two method routers
         // since the methods differ, and each keeps its own auth layer.
-        .route("/ns/{namespace}", get(handlers::info));
+        .route("/ns/{namespace}", get(handlers::info))
+        // Background-operation status. Read-tier: the opaque operation
+        // id is the capability, and warmup (read-tier) creates one too.
+        .route("/operations/{operation_id}", get(handlers::get_operation));
     // ServiceBuilder applies layers top-to-bottom: auth first
     // (attaches the Principal extension), principal limiter second
     // (reads it). `axum::Router::layer` then mounts the whole stack

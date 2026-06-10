@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use firnflow_api::auth::{AuthConfig, Secret};
 use firnflow_api::config::AppConfig;
+use firnflow_api::operations::OperationRegistry;
 use firnflow_api::rate_limit::RateLimitSettings;
 use firnflow_api::AppState;
 use firnflow_core::cache::NamespaceCache;
@@ -97,6 +98,7 @@ pub async fn test_state_with_auth(
         service,
         manager,
         metrics,
+        operations: Arc::new(OperationRegistry::new()),
         auth: Arc::new(auth),
         rate_limit,
         max_body_bytes: 32 * 1024 * 1024,
@@ -157,6 +159,7 @@ pub async fn test_state_offline_with_auth(
         service,
         manager,
         metrics,
+        operations: Arc::new(OperationRegistry::new()),
         auth: Arc::new(auth),
         rate_limit,
         max_body_bytes: 32 * 1024 * 1024,

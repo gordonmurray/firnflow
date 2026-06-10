@@ -202,7 +202,13 @@ async fn scalar_index_build_returns_202_and_list_still_works() {
         StatusCode::ACCEPTED,
         "scalar-index endpoint must return 202"
     );
-    assert_eq!(body["status"], "scalar index build queued");
+    assert!(
+        body["operation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("op_")),
+        "202 should carry an operation id: {body}"
+    );
+    assert_eq!(body["status"], "running");
 
     // 2. Wait for the background task to complete.
     let count =
@@ -272,7 +278,13 @@ async fn scalar_index_on_empty_namespace_does_not_panic() {
 
     let (status, body) = post_empty(app.clone(), format!("/ns/{ns}/scalar-index")).await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(body["status"], "scalar index build queued");
+    assert!(
+        body["operation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("op_")),
+        "202 should carry an operation id: {body}"
+    );
+    assert_eq!(body["status"], "running");
 
     // The build will have failed inside the background task. Confirm
     // the histogram for this namespace does *not* tick, then upsert

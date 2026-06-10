@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `GET /ns/{namespace}` returns namespace metadata: vector kind and dimension, live row count, fragment count, which index kinds are built (vector / FTS / scalar), and the current Lance table version. Read/write tier, bypasses the cache (it is namespace state, not a query result), and records a `firnflow_s3_requests_total{operation="info"}` tick so the backend read stays visible in the cost signal. Returns 404 only for a genuinely missing table; storage or auth failures surface as 5xx rather than a misleading "namespace does not exist". Closes #14.
+- `GET /operations/{operation_id}` reports the state of background work started by the async endpoints. Each of `warmup`, `index`, `fts-index`, `scalar-index`, and `compact` now returns an opaque `operation_id` in its `202`, and the operation moves `running` to `succeeded` or `failed`, with start/finish timestamps and a concise error message on failure. Records are in-memory and bounded — the most recent completed operations are retained and running ones are never evicted — so an unknown or evicted id returns 404. Read/write tier. The existing build/compaction duration metrics are unchanged. Closes #34.
+
+### Changed
+- The async endpoints (`warmup`, `index`, `fts-index`, `scalar-index`, `compact`) now return `{ operation_id, kind, namespace, status }` in their `202 Accepted` instead of a `{ "status": "... queued" }` confirmation; warmup additionally keeps its `queued` count. Clients should poll `GET /operations/{operation_id}` for completion rather than scraping the duration histograms.
 
 ## [0.8.1] - 2026-06-10
 

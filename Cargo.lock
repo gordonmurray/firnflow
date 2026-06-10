@@ -2548,6 +2548,7 @@ version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
+ "dashmap",
  "firnflow-core",
  "governor",
  "serde",
@@ -2559,6 +2560,7 @@ dependencies = [
  "tower_governor",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

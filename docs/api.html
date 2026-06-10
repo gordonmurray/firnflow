@@ -51,7 +51,7 @@
     <h2>Authentication</h2>
     <p>When <code>FIRNFLOW_API_KEY</code> is configured, every protected endpoint requires <code>Authorization: Bearer &lt;token&gt;</code>. Two tiers exist:</p>
     <ul>
-      <li><strong>Read/write</strong> (<code>FIRNFLOW_API_KEY</code>) — <code>upsert</code>, <code>query</code>, <code>list</code>, <code>warmup</code>.</li>
+      <li><strong>Read/write</strong> (<code>FIRNFLOW_API_KEY</code>) — <code>upsert</code>, <code>query</code>, <code>list</code>, <code>warmup</code>, <code>GET /ns/{namespace}</code>, and <code>GET /operations/{id}</code>.</li>
       <li><strong>Admin</strong> (<code>FIRNFLOW_ADMIN_API_KEY</code>) — <code>delete</code>, <code>index</code>, <code>fts-index</code>, <code>scalar-index</code>, <code>compact</code>. The admin key also satisfies read/write routes. If no admin key is configured, the read/write key authorises admin routes too (single-key fallback).</li>
     </ul>
     <p><code>/health</code> is always public. <code>/metrics</code> is public unless <code>FIRNFLOW_METRICS_TOKEN</code> is set, in which case the same Bearer header is required. Token comparisons are constant-time (<code>subtle::ConstantTimeEq</code>). See <a href="configuration.html#authentication">configuration</a> for the full env-var list, including the optional <code>FIRNFLOW_RATE_LIMIT_RPS</code> / <code>FIRNFLOW_PREAUTH_IP_LIMIT_RPS</code> rate-limit knobs.</p>
@@ -424,6 +424,10 @@
         <table>
           <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
           <tbody>
+            <tr><td><code>operation_id</code></td><td>string</td><td>Opaque handle; poll <code>GET /operations/{operation_id}</code></td></tr>
+            <tr><td><code>kind</code></td><td>string</td><td><code>warmup</code></td></tr>
+            <tr><td><code>namespace</code></td><td>string</td><td>Namespace the work targets</td></tr>
+            <tr><td><code>status</code></td><td>string</td><td>Lifecycle state at acceptance (<code>running</code>)</td></tr>
             <tr><td><code>queued</code></td><td>integer</td><td>Number of queries submitted for background execution</td></tr>
           </tbody>
         </table>
@@ -437,7 +441,13 @@
       {"vector": [0.0, 1.0, 0.0, 0.0], "k": 5}
     ]
   }'</code></pre>
-        <pre><code>{"queued": 2}</code></pre>
+        <pre><code>{
+  "operation_id": "op_018f3a2b-7c4d-7e1f-9abc-1234567890ab",
+  "kind": "warmup",
+  "namespace": "demo",
+  "status": "running",
+  "queued": 2
+}</code></pre>
 
         <div class="callout callout-info">
           <div class="callout-title">Monitoring warmup progress</div>
@@ -468,7 +478,12 @@
         </table>
 
         <h4>Response (202)</h4>
-        <pre><code>{"status": "index build queued"}</code></pre>
+        <pre><code>{
+  "operation_id": "op_018f3a2b-7c4d-7e1f-9abc-1234567890ab",
+  "kind": "index",
+  "namespace": "demo",
+  "status": "running"
+}</code></pre>
 
         <h4>Example</h4>
         <pre><code>curl -X POST http://localhost:3000/ns/demo/index \
@@ -496,7 +511,12 @@
         <p>No request body required.</p>
 
         <h4>Response (202)</h4>
-        <pre><code>{"status": "fts index build queued"}</code></pre>
+        <pre><code>{
+  "operation_id": "op_018f3a2b-7c4d-7e1f-9abc-1234567890ab",
+  "kind": "fts_index",
+  "namespace": "demo",
+  "status": "running"
+}</code></pre>
 
         <h4>Example</h4>
         <pre><code>curl -X POST http://localhost:3000/ns/demo/fts-index</code></pre>
@@ -522,7 +542,12 @@
         <p>No request body required. v1 hardcodes the column to <code>_ingested_at</code> — the same constraint <code>/list</code> puts on <code>order_by</code>.</p>
 
         <h4>Response (202)</h4>
-        <pre><code>{"status": "scalar index build queued"}</code></pre>
+        <pre><code>{
+  "operation_id": "op_018f3a2b-7c4d-7e1f-9abc-1234567890ab",
+  "kind": "scalar_index",
+  "namespace": "demo",
+  "status": "running"
+}</code></pre>
 
         <h4>Example</h4>
         <pre><code>curl -X POST http://localhost:3000/ns/demo/scalar-index</code></pre>
@@ -548,7 +573,12 @@
         <p>No request body required.</p>
 
         <h4>Response (202)</h4>
-        <pre><code>{"status": "compaction queued"}</code></pre>
+        <pre><code>{
+  "operation_id": "op_018f3a2b-7c4d-7e1f-9abc-1234567890ab",
+  "kind": "compact",
+  "namespace": "demo",
+  "status": "running"
+}</code></pre>
 
         <h4>Example</h4>
         <pre><code>curl -X POST http://localhost:3000/ns/demo/compact</code></pre>
@@ -557,6 +587,54 @@
           <div class="callout-title">When to compact</div>
           Compact after many small upsert batches have created fragment sprawl. The server logs <code>fragments_removed</code> and <code>fragments_added</code> when the compaction completes.
         </div>
+      </div>
+    </div>
+
+    <!-- GET /operations/{operation_id} -->
+    <div class="endpoint">
+      <div class="endpoint-header" aria-expanded="true">
+        <span class="method method-get">GET</span>
+        <span class="endpoint-path">/operations/{operation_id}</span>
+        <span class="endpoint-desc">Background operation status</span>
+      </div>
+      <div class="endpoint-body">
+        <p>Returns the current state of background work started by an async endpoint (<code>warmup</code>, <code>index</code>, <code>fts-index</code>, <code>scalar-index</code>, <code>compact</code>). Each of those returns an <code>operation_id</code> in its <code>202</code>; poll this endpoint to wait for completion instead of inferring it from metrics.</p>
+        <p>Records are kept in memory and bounded: the most recent completed operations are retained and running operations are never evicted, so an unknown or long-since-completed id returns 404.</p>
+
+        <h4>Response (200)</h4>
+        <table>
+          <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>operation_id</code></td><td>string</td><td>The opaque id you polled</td></tr>
+            <tr><td><code>kind</code></td><td>string</td><td><code>warmup</code>, <code>index</code>, <code>fts_index</code>, <code>scalar_index</code>, or <code>compact</code></td></tr>
+            <tr><td><code>namespace</code></td><td>string</td><td>Namespace the work targets</td></tr>
+            <tr><td><code>status</code></td><td>string</td><td><code>running</code>, <code>succeeded</code>, or <code>failed</code></td></tr>
+            <tr><td><code>started_at_ms</code></td><td>integer</td><td>Milliseconds since the Unix epoch when work began</td></tr>
+            <tr><td><code>finished_at_ms</code></td><td>integer?</td><td>Completion time in epoch milliseconds; <code>null</code> while running</td></tr>
+            <tr><td><code>error</code></td><td>string?</td><td>Concise failure message; <code>null</code> unless <code>failed</code></td></tr>
+          </tbody>
+        </table>
+
+        <h4>Status codes</h4>
+        <table>
+          <thead><tr><th>Code</th><th>When</th></tr></thead>
+          <tbody>
+            <tr><td>200</td><td>Operation found</td></tr>
+            <tr><td>404</td><td>Unknown id, or its record has aged out of the bounded registry</td></tr>
+          </tbody>
+        </table>
+
+        <h4>Example</h4>
+        <pre><code>curl http://localhost:3000/operations/op_018f3a2b-7c4d-7e1f-9abc-1234567890ab</code></pre>
+        <pre><code>{
+  "operation_id": "op_018f3a2b-7c4d-7e1f-9abc-1234567890ab",
+  "kind": "scalar_index",
+  "namespace": "demo",
+  "status": "succeeded",
+  "started_at_ms": 1779580800123,
+  "finished_at_ms": 1779580802456,
+  "error": null
+}</code></pre>
       </div>
     </div>
 

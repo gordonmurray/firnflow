@@ -165,7 +165,13 @@ async fn index_build_with_num_bits_four_returns_202_and_completes() {
     });
     let (status, body) = post_json(app.clone(), format!("/ns/{ns}/index"), index_body).await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(body["status"], "index build queued");
+    assert!(
+        body["operation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("op_")),
+        "202 should carry an operation id: {body}"
+    );
+    assert_eq!(body["status"], "running");
 
     let count = wait_for_index_build(&metrics, &ns, 1, Duration::from_secs(60)).await;
     assert_eq!(count, 1, "4-bit index build must complete");

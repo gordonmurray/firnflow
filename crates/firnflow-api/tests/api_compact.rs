@@ -151,7 +151,13 @@ async fn compact_reduces_fragments_after_many_upserts() {
     );
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let compact_body: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(compact_body["status"], "compaction queued");
+    assert!(
+        compact_body["operation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("op_")),
+        "202 should carry an operation id: {compact_body}"
+    );
+    assert_eq!(compact_body["status"], "running");
 
     // 4. Wait for the background task to complete.
     let count = wait_for_compaction(&metrics, &ns, 1, Duration::from_secs(60)).await;

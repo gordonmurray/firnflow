@@ -222,6 +222,9 @@ curl -X POST http://localhost:3000/ns/demo/upsert \
 | `/ns/{ns}/fts-index` | `POST` | admin | Build BM25 full-text search index (async, returns 202) |
 | `/ns/{ns}/scalar-index` | `POST` | admin | Build BTree index on `_ingested_at` to accelerate `/list` (async, returns 202) |
 | `/ns/{ns}/compact` | `POST` | admin | Compact and prune data files (async, returns 202) |
+| `/operations/{id}` | `GET` | read/write | Status of a background operation by the `operation_id` from its 202; 404 if unknown or evicted |
+
+The async endpoints (`warmup`, `index`, `fts-index`, `scalar-index`, `compact`) return an opaque `operation_id` in their `202`; poll `GET /operations/{id}` to see whether the work is `running`, `succeeded`, or `failed` instead of inferring it from metrics.
 
 Auth column: `open` = no header required; `read/write` = `FIRNFLOW_API_KEY` (or `FIRNFLOW_ADMIN_API_KEY`); `admin` = `FIRNFLOW_ADMIN_API_KEY` if configured, otherwise `FIRNFLOW_API_KEY` via the single-key fallback. `/metrics` is `metrics` when `FIRNFLOW_METRICS_TOKEN` is set, otherwise `open`.
 
