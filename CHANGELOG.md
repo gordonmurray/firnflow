@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-06-10
+
 ### Added
 - `NamespaceCache::close()` flushes the foyer NVMe write buffer and shuts the cache down cleanly, so entries inserted before the call are durable on disk. Groundwork for graceful shutdown (#13).
 - `NamespaceManager::generation()` returns a namespace's cache generation, derived from its Lance table version and the manifest commit timestamp, and `NamespaceCache::set_generation()` seeds the shared generation counter from it. The query read path now derives the cache key's generation from this persistent value rather than a process-local counter (see Fixed).
@@ -182,7 +184,8 @@ development through phases 1 through 8 before being made public;
   benchmark at dim=1536, 100k rows available at
   `bench/results/cold_vs_warm_aws.md`.
 
-[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/gordonmurray/firnflow/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/gordonmurray/firnflow/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/gordonmurray/firnflow/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/gordonmurray/firnflow/compare/v0.6.0...v0.7.0
