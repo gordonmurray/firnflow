@@ -12,7 +12,7 @@
 //! 3. Empty inner list and mixed inner dim both fail at the
 //!    handler/manager boundary before reaching Lance.
 //! 4. `vectors` results omit the per-row bag — the response carries
-//!    `vector: []` for multivector hits.
+//!    `vector: null` for multivector hits.
 //!
 //! Gated `#[ignore]`: needs MinIO up.
 //!
@@ -93,10 +93,12 @@ async fn upsert_and_query_round_trip_multivector() {
 
     // The response intentionally does not echo the per-row bag —
     // the bag can be hundreds of KB and is not useful to round-trip.
-    let echoed = results[0]["vector"].as_array().expect("vector field");
+    // It is rendered as `null` (not `[]`) since the result vector
+    // field became `Option<Vec<f32>>`.
     assert!(
-        echoed.is_empty(),
-        "multivector results must omit the bag; got {echoed:?}"
+        results[0]["vector"].is_null(),
+        "multivector results must omit the bag; got {}",
+        results[0]["vector"]
     );
 }
 

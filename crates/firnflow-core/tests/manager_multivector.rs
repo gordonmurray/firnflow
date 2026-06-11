@@ -10,8 +10,8 @@
 //! - Subsequent upserts validate the payload shape against the
 //!   namespace kind and reject mismatches.
 //! - Queries with a `vectors:` payload return ranked hits.
-//! - `QueryResult.vector` is empty for multivector results (the bag
-//!   is intentionally not echoed; see manager.rs `extract_row_vector`).
+//! - `QueryResult.vector` is `None` for multivector results (the bag
+//!   is intentionally not echoed; see manager.rs `batches_to_results`).
 //! - Wrong-shape payloads (single into multivector, multi into
 //!   single) fail with clear errors at the manager boundary.
 //! - Empty inner lists and mixed sub-vector dims fail validation.
@@ -174,7 +174,15 @@ async fn upsert_then_query_returns_multivector_hits() {
         .expect("index build");
 
     let results = manager
-        .query(&ns, Vec::new(), Some(vec![unit(0), unit(1)]), 3, None, None)
+        .query(
+            &ns,
+            Vec::new(),
+            Some(vec![unit(0), unit(1)]),
+            3,
+            None,
+            None,
+            true,
+        )
         .await
         .expect("multivector query");
 
@@ -189,9 +197,9 @@ async fn upsert_then_query_returns_multivector_hits() {
         results.results[0].id
     );
     assert!(
-        results.results[0].vector.is_empty(),
-        "multivector results must not echo the bag — got {} floats",
-        results.results[0].vector.len()
+        results.results[0].vector.is_none(),
+        "multivector results must not echo the bag — got {:?}",
+        results.results[0].vector
     );
 }
 
@@ -224,7 +232,7 @@ async fn single_payload_rejected_on_multivector_namespace() {
 
     // Same on the query side.
     let err = manager
-        .query(&ns, unit(0), None, 2, None, None)
+        .query(&ns, unit(0), None, 2, None, None, true)
         .await
         .expect_err("single query on multivector namespace must fail");
     let msg = format!("{err}");
@@ -262,7 +270,15 @@ async fn multi_payload_rejected_on_single_namespace() {
 
     // Same on the query side.
     let err = manager
-        .query(&ns, Vec::new(), Some(vec![unit(0), unit(1)]), 2, None, None)
+        .query(
+            &ns,
+            Vec::new(),
+            Some(vec![unit(0), unit(1)]),
+            2,
+            None,
+            None,
+            true,
+        )
         .await
         .expect_err("multivector query on single namespace must fail");
     let msg = format!("{err}");
@@ -348,7 +364,15 @@ async fn create_index_forces_cosine_on_multivector() {
 
     // A multivector query after index build must still succeed.
     let results = manager
-        .query(&ns, Vec::new(), Some(vec![unit(0), unit(1)]), 5, None, None)
+        .query(
+            &ns,
+            Vec::new(),
+            Some(vec![unit(0), unit(1)]),
+            5,
+            None,
+            None,
+            true,
+        )
         .await
         .expect("post-index multivector query");
     assert!(

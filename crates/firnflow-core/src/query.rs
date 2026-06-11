@@ -56,6 +56,19 @@ pub struct QueryRequest {
     /// When set without any vector field, triggers FTS-only search.
     #[serde(default)]
     pub text: Option<String>,
+    /// Whether result rows carry the stored vector. Defaults to
+    /// `true`, preserving the existing response shape. `false` asks
+    /// the backend not to materialise or return the stored vector
+    /// column — at realistic dimensions the vector dominates the
+    /// response payload (6 KiB of raw `f32` per hit at dim=1536),
+    /// so callers that only need `id`/`score`/`text` save the
+    /// transfer, the cache bytes, and the parse cost.
+    ///
+    /// Participates in the exact-cache key: a full and a vector-light
+    /// result for the same search are different payloads and must not
+    /// collide.
+    #[serde(default = "default_include_vector")]
+    pub include_vector: bool,
     /// Opt-in semantic-cache controls. Absent or `enabled: false`
     /// leaves the exact result cache as the only short-circuit;
     /// `enabled: true` permits reusing the result of a previous
@@ -90,6 +103,12 @@ pub struct SemanticCacheRequest {
     /// the exact one.
     #[serde(default)]
     pub min_similarity: Option<f32>,
+}
+
+/// Serde default for [`QueryRequest::include_vector`] — vectors are
+/// returned unless the caller opts out.
+fn default_include_vector() -> bool {
+    true
 }
 
 /// Conservative default cosine threshold for semantic-cache hits.
@@ -271,6 +290,7 @@ mod tests {
             k: 10,
             nprobes: None,
             text: None,
+            include_vector: true,
             semantic_cache: None,
         }
     }

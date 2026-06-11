@@ -21,12 +21,26 @@ pub struct QueryResult {
     /// not interpret it.
     pub score: f32,
     /// The stored vector that produced this hit. Width is fixed per
-    /// namespace; the cache serialises the literal bytes.
-    pub vector: Vec<f32>,
+    /// namespace; the cache serialises the literal bytes. `None` when
+    /// the caller opted out via `include_vector: false`, and always
+    /// `None` for multivector hits (the bag of sub-vectors is
+    /// hundreds of KB and is intentionally not echoed back).
+    ///
+    /// Plain `#[serde(default)]` on purpose — `skip_serializing_if`
+    /// would break the positional bincode encoding this type round-
+    /// trips through in the result cache. JSON renders `None` as
+    /// `null`.
+    #[serde(default)]
+    pub vector: Option<Vec<f32>>,
     /// The stored text for this hit, if the namespace has a text
     /// column and the row was upserted with text.
     #[serde(default)]
     pub text: Option<String>,
+    /// Server-side timestamp (microseconds since Unix epoch) the row
+    /// was written — the same `_ingested_at` value `/list` returns.
+    /// `None` for namespaces created before the column existed.
+    #[serde(default)]
+    pub ingested_at_micros: Option<i64>,
 }
 
 /// A full query response: ranked hits plus an opaque tracing id.

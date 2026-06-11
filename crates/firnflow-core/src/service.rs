@@ -219,16 +219,37 @@ impl NamespaceService {
         let generation = self.manager.generation(ns).await?;
         self.cache.set_generation(ns, generation);
 
-        // 1. Exact cache — always consulted, opt-in or not.
+        // 1. Exact cache — always consulted, opt-in or not. A payload
+        //    that fails to decode is treated as a miss, not an error:
+        //    the NVMe tier survives restarts, so after an upgrade that
+        //    changes the result wire format a recovered entry can hit
+        //    at the same key with bytes this build cannot read. The
+        //    fall-through re-runs the query and repopulates the entry
+        //    with the current format — self-healing, at the cost of
+        //    one backend round-trip.
         let (exact_hit, captured_generation) = self.cache.try_get(ns, query_hash).await;
         if let Some(bytes) = exact_hit {
-            let decoded = decode_payload(&bytes)?;
-            self.metrics
-                .record_query(ns, classify_query_type(req), start.elapsed().as_secs_f64());
-            return Ok(QueryOutcome {
-                result: decoded,
-                cache_source: QueryCacheSource::ExactCache,
-            });
+            match decode_payload(&bytes) {
+                Ok(decoded) => {
+                    self.metrics.record_query(
+                        ns,
+                        classify_query_type(req),
+                        start.elapsed().as_secs_f64(),
+                    );
+                    return Ok(QueryOutcome {
+                        result: decoded,
+                        cache_source: QueryCacheSource::ExactCache,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        namespace = %ns,
+                        error = %e,
+                        "cached result payload failed to decode; \
+                         treating as a miss and re-running the query"
+                    );
+                }
+            }
         }
 
         // 2. Semantic sidecar — only when opt-in and eligible.
@@ -251,23 +272,40 @@ impl NamespaceService {
         if let Some(sem) = semantic_opt {
             if semantic_eligible {
                 let threshold = effective_semantic_threshold(sem);
-                match self
-                    .semantic
-                    .lookup(ns, &req.vector, req.k, nprobes_resolved, threshold)
-                {
-                    SemanticLookup::Hit { bytes, .. } => {
-                        let decoded = decode_payload(&bytes)?;
-                        self.metrics.record_semantic_cache_hit(ns);
-                        self.metrics.record_query(
-                            ns,
-                            classify_query_type(req),
-                            start.elapsed().as_secs_f64(),
-                        );
-                        return Ok(QueryOutcome {
-                            result: decoded,
-                            cache_source: QueryCacheSource::SemanticCache,
-                        });
-                    }
+                match self.semantic.lookup(
+                    ns,
+                    &req.vector,
+                    req.k,
+                    nprobes_resolved,
+                    req.include_vector,
+                    threshold,
+                ) {
+                    // Same decode-failure handling as the exact cache:
+                    // unreadable bytes degrade to a miss and the
+                    // backend repopulates both layers below.
+                    SemanticLookup::Hit { bytes, .. } => match decode_payload(&bytes) {
+                        Ok(decoded) => {
+                            self.metrics.record_semantic_cache_hit(ns);
+                            self.metrics.record_query(
+                                ns,
+                                classify_query_type(req),
+                                start.elapsed().as_secs_f64(),
+                            );
+                            return Ok(QueryOutcome {
+                                result: decoded,
+                                cache_source: QueryCacheSource::SemanticCache,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                namespace = %ns,
+                                error = %e,
+                                "semantic-cache payload failed to decode; \
+                                 treating as a miss and re-running the query"
+                            );
+                            self.metrics.record_semantic_cache_miss(ns);
+                        }
+                    },
                     SemanticLookup::Miss => {
                         self.metrics.record_semantic_cache_miss(ns);
                     }
@@ -291,6 +329,7 @@ impl NamespaceService {
                 req.k,
                 req.nprobes,
                 req.text.clone(),
+                req.include_vector,
             )
             .await?;
         let bytes = encode_payload(&result)?;
@@ -303,6 +342,7 @@ impl NamespaceService {
                 req.vector.clone(),
                 req.k,
                 nprobes_resolved,
+                req.include_vector,
                 bytes.clone(),
             );
         }
@@ -401,10 +441,15 @@ impl NamespaceService {
 ///
 /// The `semantic_cache` control field is intentionally excluded —
 /// toggling opt-in semantic caching must not split otherwise
-/// identical cache entries. Bincode-2 over a tuple-view of the
-/// underlying fields gives a deterministic, allocation-light
-/// encoding suitable for hashing.
-fn hash_query_for_cache(req: &QueryRequest) -> Result<QueryHash, FirnflowError> {
+/// identical cache entries. `include_vector` is intentionally
+/// *included* — see the field comment below. Bincode-2 over a
+/// tuple-view of the underlying fields gives a deterministic,
+/// allocation-light encoding suitable for hashing.
+///
+/// `pub` but hidden: integration tests use it to seed cache entries
+/// at the same key the read path derives. Not a public API.
+#[doc(hidden)]
+pub fn hash_query_for_cache(req: &QueryRequest) -> Result<QueryHash, FirnflowError> {
     #[derive(Serialize)]
     struct Canonical<'a> {
         vector: &'a Vec<f32>,
@@ -412,6 +457,10 @@ fn hash_query_for_cache(req: &QueryRequest) -> Result<QueryHash, FirnflowError> 
         k: usize,
         nprobes: Option<usize>,
         text: &'a Option<String>,
+        // Deliberately in the key, unlike `semantic_cache`: a full
+        // and a vector-light result set are different payloads and
+        // must not collide on the same entry.
+        include_vector: bool,
     }
     let canonical = Canonical {
         vector: &req.vector,
@@ -419,6 +468,7 @@ fn hash_query_for_cache(req: &QueryRequest) -> Result<QueryHash, FirnflowError> 
         k: req.k,
         nprobes: req.nprobes,
         text: &req.text,
+        include_vector: req.include_vector,
     };
     let bytes = bincode::serde::encode_to_vec(&canonical, config::standard())
         .map_err(|e| FirnflowError::Backend(format!("encode query: {e}")))?;

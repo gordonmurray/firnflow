@@ -82,7 +82,7 @@ async fn upsert_then_query_returns_nearest_neighbor() {
     // Query with the exact stored vector for id=1. It must come back
     // as the top hit with ~zero distance.
     let results = manager
-        .query(&ns, unit_vector(0), None, 3, None, None)
+        .query(&ns, unit_vector(0), None, 3, None, None, true)
         .await
         .expect("query");
 
@@ -94,14 +94,22 @@ async fn upsert_then_query_returns_nearest_neighbor() {
         "self-distance should be ~0, got {}",
         top.score
     );
+    let top_vector = top
+        .vector
+        .as_ref()
+        .expect("default query must return the stored vector");
     assert_eq!(
-        top.vector.len(),
+        top_vector.len(),
         DIM,
         "returned vector width must match schema"
     );
     assert_eq!(
-        top.vector[0], 1.0,
+        top_vector[0], 1.0,
         "returned vector[0] must be the stored value"
+    );
+    assert!(
+        top.ingested_at_micros.is_some_and(|t| t > 0),
+        "query results must carry the row's _ingested_at timestamp"
     );
 }
 

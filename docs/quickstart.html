@@ -94,10 +94,11 @@ docker compose up --build</code></pre>
     <pre><code>{
   "query_id": "a1b2c3d4",
   "results": [
-    {"id": 1, "score": 0.01, "vector": [1.0, 0.0, ...], "text": null},
-    {"id": 2, "score": 0.99, "vector": [0.0, 1.0, ...], "text": null}
+    {"id": 1, "score": 0.01, "vector": [1.0, 0.0, ...], "text": null, "ingested_at_micros": 1718000000000000},
+    {"id": 2, "score": 0.99, "vector": [0.0, 1.0, ...], "text": null, "ingested_at_micros": 1718000000000000}
   ]
 }</code></pre>
+    <p>Hits carry the stored vector by default. If you only need ids, scores, and text, add <code>"include_vector": false</code> to the request — at realistic dimensions the vectors are most of the response bytes.</p>
 
     <div class="callout callout-info">
       <div class="callout-title">Cache in action</div>

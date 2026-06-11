@@ -1,11 +1,11 @@
 //! Opt-in semantic sidecar for the exact result cache.
 //!
-//! Stores recent (query vector, k, nprobes, result bytes) tuples
-//! per namespace generation. When the exact cache misses and the
-//! caller has opted in, the read path scans this sidecar for a
-//! cached query whose vector is within the caller's cosine
-//! threshold and whose surrounding shape (`k`, `nprobes`)
-//! matches the new request.
+//! Stores recent (query vector, k, nprobes, include_vector, result
+//! bytes) tuples per namespace generation. When the exact cache
+//! misses and the caller has opted in, the read path scans this
+//! sidecar for a cached query whose vector is within the caller's
+//! cosine threshold and whose surrounding shape (`k`, `nprobes`,
+//! `include_vector`) matches the new request.
 //!
 //! The sidecar is deliberately small, in-memory only, and bounded:
 //! it is an optimisation layer, not the main corpus index. A linear
@@ -67,6 +67,10 @@ struct SemanticEntry {
     /// produced with this value, so a lookup must match it before
     /// the cached bytes can be reused.
     nprobes: usize,
+    /// Whether the cached bytes carry stored vectors. A vector-light
+    /// payload must never answer a full-payload request (or vice
+    /// versa), so this gates matches the same way `k`/`nprobes` do.
+    include_vector: bool,
     /// Same byte payload the exact cache would have stored for this
     /// query. Decoding is the caller's responsibility.
     result_bytes: Vec<u8>,
@@ -170,6 +174,7 @@ impl SemanticCache {
         query_vector: &[f32],
         k: usize,
         nprobes: usize,
+        include_vector: bool,
         min_similarity: f32,
     ) -> SemanticLookup {
         let current_gen = self.generations.current(ns);
@@ -202,8 +207,8 @@ impl SemanticCache {
         let mut best: Option<(f32, &SemanticEntry)> = None;
         for entry in state.entries.iter() {
             // Shape gates first — short-circuits avoid the dot
-            // product when k/nprobes/dim don't match.
-            if entry.k != k || entry.nprobes != nprobes {
+            // product when k/nprobes/include_vector/dim don't match.
+            if entry.k != k || entry.nprobes != nprobes || entry.include_vector != include_vector {
                 continue;
             }
             if entry.query_vector.len() != query_vector.len() {
@@ -243,6 +248,7 @@ impl SemanticCache {
     /// `generation` should be the value the exact-cache populate
     /// used; mismatches against the live generation are dropped
     /// silently (same wasted-work fate as the exact cache).
+    #[allow(clippy::too_many_arguments)]
     pub fn insert(
         &self,
         ns: &NamespaceId,
@@ -250,6 +256,7 @@ impl SemanticCache {
         query_vector: Vec<f32>,
         k: usize,
         nprobes: usize,
+        include_vector: bool,
         result_bytes: Vec<u8>,
     ) {
         let current_gen = self.generations.current(ns);
@@ -271,6 +278,7 @@ impl SemanticCache {
             norm,
             k,
             nprobes,
+            include_vector,
             result_bytes,
         };
 
@@ -340,7 +348,7 @@ mod tests {
     #[test]
     fn empty_namespace_reports_empty_index() {
         let (cache, _gens, n) = fixture();
-        let lookup = cache.lookup(&n, &[1.0, 0.0], 10, 20, 0.99);
+        let lookup = cache.lookup(&n, &[1.0, 0.0], 10, 20, true, 0.99);
         assert!(matches!(lookup, SemanticLookup::EmptyIndex));
     }
 
@@ -353,9 +361,10 @@ mod tests {
             vec![1.0, 0.0],
             10,
             20,
+            true,
             b"payload".to_vec(),
         );
-        let lookup = cache.lookup(&n, &[1.0, 0.0], 10, 20, 0.99);
+        let lookup = cache.lookup(&n, &[1.0, 0.0], 10, 20, true, 0.99);
         match lookup {
             SemanticLookup::Hit { bytes, similarity } => {
                 assert_eq!(bytes, b"payload");
@@ -374,50 +383,100 @@ mod tests {
             vec![1.0, 0.0, 0.0],
             10,
             20,
+            true,
             b"close".to_vec(),
         );
         // 0.999 cosine ~ a tiny rotation
         let probe = vec![0.999_f32.sqrt(), (1.0_f32 - 0.999).sqrt(), 0.0];
-        let lookup = cache.lookup(&n, &probe, 10, 20, 0.9);
+        let lookup = cache.lookup(&n, &probe, 10, 20, true, 0.9);
         assert!(matches!(lookup, SemanticLookup::Hit { .. }));
     }
 
     #[test]
     fn below_threshold_misses() {
         let (cache, gens, n) = fixture();
-        cache.insert(&n, gens.current(&n), vec![1.0, 0.0], 10, 20, b"x".to_vec());
+        cache.insert(
+            &n,
+            gens.current(&n),
+            vec![1.0, 0.0],
+            10,
+            20,
+            true,
+            b"x".to_vec(),
+        );
         // Orthogonal: cosine == 0
-        let lookup = cache.lookup(&n, &[0.0, 1.0], 10, 20, 0.5);
+        let lookup = cache.lookup(&n, &[0.0, 1.0], 10, 20, true, 0.5);
         assert!(matches!(lookup, SemanticLookup::Miss));
     }
 
     #[test]
     fn k_mismatch_skips_entry() {
         let (cache, gens, n) = fixture();
-        cache.insert(&n, gens.current(&n), vec![1.0, 0.0], 10, 20, b"x".to_vec());
-        let lookup = cache.lookup(&n, &[1.0, 0.0], 50, 20, 0.99);
+        cache.insert(
+            &n,
+            gens.current(&n),
+            vec![1.0, 0.0],
+            10,
+            20,
+            true,
+            b"x".to_vec(),
+        );
+        let lookup = cache.lookup(&n, &[1.0, 0.0], 50, 20, true, 0.99);
+        assert!(matches!(lookup, SemanticLookup::Miss));
+    }
+
+    #[test]
+    fn include_vector_mismatch_skips_entry() {
+        let (cache, gens, n) = fixture();
+        cache.insert(
+            &n,
+            gens.current(&n),
+            vec![1.0, 0.0],
+            10,
+            20,
+            true,
+            b"x".to_vec(),
+        );
+        // A full-payload entry must not answer a vector-light request.
+        let lookup = cache.lookup(&n, &[1.0, 0.0], 10, 20, false, 0.99);
         assert!(matches!(lookup, SemanticLookup::Miss));
     }
 
     #[test]
     fn nprobes_mismatch_skips_entry() {
         let (cache, gens, n) = fixture();
-        cache.insert(&n, gens.current(&n), vec![1.0, 0.0], 10, 20, b"x".to_vec());
-        let lookup = cache.lookup(&n, &[1.0, 0.0], 10, 50, 0.99);
+        cache.insert(
+            &n,
+            gens.current(&n),
+            vec![1.0, 0.0],
+            10,
+            20,
+            true,
+            b"x".to_vec(),
+        );
+        let lookup = cache.lookup(&n, &[1.0, 0.0], 10, 50, true, 0.99);
         assert!(matches!(lookup, SemanticLookup::Miss));
     }
 
     #[test]
     fn generation_bump_drops_entries_on_next_lookup() {
         let (cache, gens, n) = fixture();
-        cache.insert(&n, gens.current(&n), vec![1.0, 0.0], 10, 20, b"x".to_vec());
+        cache.insert(
+            &n,
+            gens.current(&n),
+            vec![1.0, 0.0],
+            10,
+            20,
+            true,
+            b"x".to_vec(),
+        );
         assert_eq!(cache.len(&n), 1);
 
         // Simulate a write bumping the generation; the eager
         // invalidate path is not invoked here, so we lean on the
         // lazy drop inside `lookup`.
         gens.bump(&n);
-        let lookup = cache.lookup(&n, &[1.0, 0.0], 10, 20, 0.99);
+        let lookup = cache.lookup(&n, &[1.0, 0.0], 10, 20, true, 0.99);
         assert!(matches!(lookup, SemanticLookup::EmptyIndex));
         assert_eq!(cache.len(&n), 0);
     }
@@ -425,7 +484,15 @@ mod tests {
     #[test]
     fn explicit_invalidate_drops_entries() {
         let (cache, gens, n) = fixture();
-        cache.insert(&n, gens.current(&n), vec![1.0, 0.0], 10, 20, b"x".to_vec());
+        cache.insert(
+            &n,
+            gens.current(&n),
+            vec![1.0, 0.0],
+            10,
+            20,
+            true,
+            b"x".to_vec(),
+        );
         gens.bump(&n);
         cache.invalidate(&n);
         assert_eq!(cache.len(&n), 0);
@@ -436,7 +503,7 @@ mod tests {
         let (cache, gens, n) = fixture();
         let stale_gen = gens.current(&n);
         gens.bump(&n);
-        cache.insert(&n, stale_gen, vec![1.0, 0.0], 10, 20, b"x".to_vec());
+        cache.insert(&n, stale_gen, vec![1.0, 0.0], 10, 20, true, b"x".to_vec());
         // Nothing landed: the lazy reset sees the empty list.
         assert_eq!(cache.len(&n), 0);
     }
@@ -449,7 +516,7 @@ mod tests {
             let mut v = vec![0.0_f32; 4];
             let idx = i % v.len();
             v[idx] = 1.0 + i as f32 * 0.001;
-            cache.insert(&n, gens.current(&n), v, 10, 20, vec![i as u8]);
+            cache.insert(&n, gens.current(&n), v, 10, 20, true, vec![i as u8]);
         }
         assert_eq!(cache.len(&n), 4);
     }
@@ -457,8 +524,16 @@ mod tests {
     #[test]
     fn zero_vector_lookup_misses_without_panic() {
         let (cache, gens, n) = fixture();
-        cache.insert(&n, gens.current(&n), vec![1.0, 0.0], 10, 20, b"x".to_vec());
-        let lookup = cache.lookup(&n, &[0.0, 0.0], 10, 20, 0.5);
+        cache.insert(
+            &n,
+            gens.current(&n),
+            vec![1.0, 0.0],
+            10,
+            20,
+            true,
+            b"x".to_vec(),
+        );
+        let lookup = cache.lookup(&n, &[0.0, 0.0], 10, 20, true, 0.5);
         assert!(matches!(lookup, SemanticLookup::Miss));
     }
 }

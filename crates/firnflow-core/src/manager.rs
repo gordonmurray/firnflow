@@ -48,7 +48,7 @@ use lance::dataset::scanner::ColumnOrdering;
 use lancedb::index::scalar::{BTreeIndexBuilder, FtsIndexBuilder, FullTextSearchQuery};
 use lancedb::index::vector::IvfPqIndexBuilder;
 use lancedb::index::{Index, IndexType};
-use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::OptimizeAction;
 use lancedb::DistanceType;
 use object_store::aws::AmazonS3Builder;
@@ -692,6 +692,13 @@ impl NamespaceManager {
     ///
     /// `nprobes` controls how many IVF partitions are searched for
     /// vector queries. Defaults to [`DEFAULT_NPROBES`] (20).
+    ///
+    /// `include_vector: false` projects the stored vector column out
+    /// of the result batches — hits carry `id`, `score`, `text`, and
+    /// `ingested_at_micros` but `vector: None`. The query vector is
+    /// still used for search; only the response materialisation
+    /// changes.
+    #[allow(clippy::too_many_arguments)]
     pub async fn query(
         &self,
         ns: &NamespaceId,
@@ -700,6 +707,7 @@ impl NamespaceManager {
         k: usize,
         nprobes: Option<usize>,
         text: Option<String>,
+        include_vector: bool,
     ) -> Result<QueryResultSet, FirnflowError> {
         let info = match self.resolve_schema_info(ns).await? {
             Some(info) => info,
@@ -778,6 +786,24 @@ impl NamespaceManager {
         let nprobes = nprobes.unwrap_or(DEFAULT_NPROBES);
         let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
 
+        // Opting out of the stored vector becomes a column projection:
+        // Lance then never materialises the vector column into the
+        // result batches (for multivector namespaces that is the whole
+        // bag of sub-vectors). The score column (`_distance`, `_score`,
+        // or `_relevance_score`) is auto-projected by Lance on top of
+        // the selection. `id` and `text` are always in the schema;
+        // `_ingested_at` only exists on tables created since the
+        // column was introduced.
+        let projection: Option<Vec<&str>> = if include_vector {
+            None
+        } else {
+            let mut cols = vec!["id", "text"];
+            if info.has_ingested_at {
+                cols.push(INGESTED_AT_COLUMN);
+            }
+            Some(cols)
+        };
+
         let stream = if let Some(shape) = shape {
             // Vector-only or hybrid (lancedb auto-detects hybrid when
             // both nearest_to and full_text_search are set). The
@@ -819,16 +845,23 @@ impl NamespaceManager {
             if let Some(ref t) = text {
                 vq = vq.full_text_search(FullTextSearchQuery::new(t.clone()));
             }
+            if let Some(ref cols) = projection {
+                vq = vq.select(Select::columns(cols));
+            }
             vq.execute()
                 .await
                 .map_err(|e| FirnflowError::Backend(format!("query.execute: {e}")))?
         } else {
             // FTS-only
             let t = text.unwrap();
-            tbl.query()
+            let mut q = tbl
+                .query()
                 .full_text_search(FullTextSearchQuery::new(t))
-                .limit(k)
-                .execute()
+                .limit(k);
+            if let Some(ref cols) = projection {
+                q = q.select(Select::columns(cols));
+            }
+            q.execute()
                 .await
                 .map_err(|e| FirnflowError::Backend(format!("fts.execute: {e}")))?
         };
@@ -838,7 +871,7 @@ impl NamespaceManager {
             .await
             .map_err(|e| FirnflowError::Backend(format!("query.collect: {e}")))?;
 
-        let results = batches_to_results(&batches, info.kind)?;
+        let results = batches_to_results(&batches, info.kind, include_vector)?;
         Ok(QueryResultSet {
             query_id: String::new(),
             results,
@@ -1603,6 +1636,7 @@ fn batches_to_list_rows(
 fn batches_to_results(
     batches: &[RecordBatch],
     kind: VectorKind,
+    include_vector: bool,
 ) -> Result<Vec<QueryResult>, FirnflowError> {
     let mut out = Vec::new();
     for batch in batches {
@@ -1624,8 +1658,22 @@ fn batches_to_results(
             .column_by_name("text")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
+        // `_ingested_at` is absent on tables created before the
+        // column existed; those rows report `None`.
+        let ingested_ats = batch
+            .column_by_name(INGESTED_AT_COLUMN)
+            .and_then(|c| c.as_any().downcast_ref::<TimestampMicrosecondArray>());
+
         for row in 0..batch.num_rows() {
-            let vector = extract_row_vector(batch, row, kind, "query result")?;
+            // Multivector hits never carry the bag (it is hundreds of
+            // KB per row); single-vector hits carry the stored vector
+            // unless the caller opted out and the column was projected
+            // away.
+            let vector = if include_vector && kind == VectorKind::Single {
+                Some(extract_row_vector(batch, row, kind, "query result")?)
+            } else {
+                None
+            };
             let text = texts.and_then(|t| {
                 if t.is_null(row) {
                     None
@@ -1633,11 +1681,19 @@ fn batches_to_results(
                     Some(t.value(row).to_owned())
                 }
             });
+            let ingested_at_micros = ingested_ats.and_then(|a| {
+                if a.is_null(row) {
+                    None
+                } else {
+                    Some(a.value(row))
+                }
+            });
             out.push(QueryResult {
                 id: ids.value(row),
                 score: scores.value(row),
                 vector,
                 text,
+                ingested_at_micros,
             });
         }
     }

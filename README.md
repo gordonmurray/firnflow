@@ -173,6 +173,8 @@ curl -X POST http://localhost:3000/ns/demo/query \
      -d '{"vector": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "k": 1}'
 ```
 
+Hits carry the stored vector by default. Add `"include_vector": false` to the request if you only need ids, scores, and text — at realistic dimensions the vectors are most of the response bytes, so skipping them shrinks the response and the cached result, and can cut the object-storage read for the returned rows' vectors. It is response projection, not a scan optimisation: Lance still reads whatever it needs to score the query.
+
 ### 4. Check the Savings
 See how much object-storage traffic you've avoided:
 
@@ -288,7 +290,7 @@ The read path is:
 
 1. Compute the exact-cache key (which does **not** include the `semantic_cache` block, so toggling the option does not split otherwise-identical entries).
 2. On an exact hit, return the cached bytes — semantic layer is not consulted.
-3. On an exact miss, scan the per-namespace semantic sidecar for a cached query whose vector cosine-similarity is at least `min_similarity` and whose `k` / `nprobes` match. If something clears the bar, return its bytes.
+3. On an exact miss, scan the per-namespace semantic sidecar for a cached query whose vector cosine-similarity is at least `min_similarity` and whose `k` / `nprobes` / `include_vector` match. If something clears the bar, return its bytes.
 4. Otherwise run the backend query, populate both layers, and return the fresh result.
 
 **v1 boundaries** (returns 400 otherwise):

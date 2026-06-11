@@ -202,6 +202,7 @@
             <tr><td><code>k</code></td><td>integer</td><td>Yes</td><td>Number of results to return</td></tr>
             <tr><td><code>nprobes</code></td><td>integer</td><td>No</td><td>IVF partitions to probe (default 20). Higher values trade latency for recall.</td></tr>
             <tr><td><code>text</code></td><td>string</td><td>No*</td><td>Text query for full-text or hybrid search</td></tr>
+            <tr><td><code>include_vector</code></td><td>bool</td><td>No</td><td>Whether result rows carry the stored vector (default <code>true</code>). Set <code>false</code> when you only need <code>id</code>/<code>score</code>/<code>text</code> — the vector column is dropped from the returned rows, so the response and the cached result shrink, and the object-storage read for those rows' vectors is avoided. At dim=1536 each hit carries ~6&nbsp;KiB of raw vector data, so a 100-hit response drops by roughly 600&nbsp;KiB. This is response projection, not a scan optimisation: Lance still reads whatever it needs to score the query, so an unindexed flat scan reads the vectors regardless.</td></tr>
             <tr><td><code>semantic_cache</code></td><td>object</td><td>No</td><td>Opt-in semantic-cache controls. See <em>Semantic cache</em> below. Omitting the field preserves the legacy exact-cache-only behaviour.</td></tr>
           </tbody>
         </table>
@@ -219,7 +220,7 @@
         <p>Behaviour:</p>
         <ul>
           <li><strong>The <code>semantic_cache</code> block does not change the exact-cache key.</strong> Toggling <code>enabled</code> on and off does not split otherwise-identical entries.</li>
-          <li><strong>k and nprobes must match</strong> between the incoming request and the cached candidate; mismatches are skipped.</li>
+          <li><strong>k, nprobes, and include_vector must match</strong> between the incoming request and the cached candidate; mismatches are skipped. A vector-light cached result is never used to answer a request that wants vectors back, or vice versa.</li>
           <li><strong>Any committed change drops the semantic layer</strong> alongside the exact cache: writes, deletes, compactions, and index builds. An index build invalidates too, because it is a Lance commit that advances the table version the cache keys on, even though the rows are unchanged.</li>
           <li><strong>Behaviour is observable</strong> via three Prometheus counters: <code>firnflow_semantic_cache_hits_total{namespace}</code>, <code>firnflow_semantic_cache_misses_total{namespace}</code>, and <code>firnflow_semantic_cache_rejections_total{namespace, reason}</code> (with bounded reason labels: <code>unsupported_query_shape</code>, <code>empty_index</code>).</li>
         </ul>
@@ -239,8 +240,9 @@
             <tr><td><code>results</code></td><td>array</td><td>Ordered list of matching rows</td></tr>
             <tr><td><code>results[].id</code></td><td>u64</td><td>Row identifier</td></tr>
             <tr><td><code>results[].score</code></td><td>float32</td><td>Distance (vector / multivector), BM25 score (FTS), or relevance score (hybrid)</td></tr>
-            <tr><td><code>results[].vector</code></td><td>float32[]</td><td>The stored vector for single-vector hits; empty (<code>[]</code>) for multivector hits — the bag is intentionally not echoed.</td></tr>
+            <tr><td><code>results[].vector</code></td><td>float32[]?</td><td>The stored vector for single-vector hits. <code>null</code> when the request set <code>include_vector: false</code>, and always <code>null</code> for multivector hits — the bag is intentionally not echoed.</td></tr>
             <tr><td><code>results[].text</code></td><td>string?</td><td>The stored text (null if none)</td></tr>
+            <tr><td><code>results[].ingested_at_micros</code></td><td>i64?</td><td>Server-side microsecond timestamp the row was written — the same value <code>/list</code> reports. <code>null</code> on namespaces created before the timestamp column existed.</td></tr>
           </tbody>
         </table>
 

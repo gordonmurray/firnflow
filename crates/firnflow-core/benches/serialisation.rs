@@ -34,10 +34,13 @@ fn make_result_set(n: usize) -> QueryResultSet {
             // Deterministic but varied — not all-zero, so any run of
             // the serialiser that might special-case sparse/uniform
             // data is still exercised against realistic-ish values.
-            vector: (0..VECTOR_DIM)
-                .map(|j| ((i * 7 + j * 13) as f32) * 0.0001)
-                .collect(),
+            vector: Some(
+                (0..VECTOR_DIM)
+                    .map(|j| ((i * 7 + j * 13) as f32) * 0.0001)
+                    .collect(),
+            ),
             text: None,
+            ingested_at_micros: Some(1_700_000_000_000_000 + i as i64),
         })
         .collect();
     QueryResultSet {

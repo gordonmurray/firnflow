@@ -113,6 +113,7 @@ async fn service_query_happy_path() {
         k: 4,
         nprobes: None,
         text: None,
+        include_vector: true,
         semantic_cache: None,
     };
     let res = service.query(&ns, &req).await.expect("query");

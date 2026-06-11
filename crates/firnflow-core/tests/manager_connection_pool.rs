@@ -141,6 +141,7 @@ async fn cached_handle_survives_across_operations() {
             2,
             None,
             None,
+            true,
         )
         .await
         .expect("query reuses pooled handle");
@@ -239,6 +240,7 @@ async fn handle_evicted_after_compaction() {
             2,
             None,
             None,
+            true,
         )
         .await
         .expect("query after compaction reopens the table");

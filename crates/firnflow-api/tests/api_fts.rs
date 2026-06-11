@@ -201,4 +201,51 @@ async fn vector_fts_and_hybrid_queries() {
     assert_eq!(vector_count, 1.0, "expected 1 vector query");
     assert_eq!(fts_count, 1.0, "expected 1 FTS query");
     assert_eq!(hybrid_count, 1.0, "expected 1 hybrid query");
+
+    // 7. FTS-only with include_vector=false — the projection must
+    //    survive the FTS code path (the score column is auto-added
+    //    on top of the selection).
+    let fts_light_body = json!({
+        "text": "lazy",
+        "k": 4,
+        "include_vector": false
+    });
+    let (status, body) = post_json(app.clone(), format!("/ns/{ns}/query"), fts_light_body).await;
+    assert_eq!(status, StatusCode::OK, "vector-light FTS query status");
+    let results = body["results"].as_array().expect("results array");
+    assert!(!results.is_empty(), "vector-light FTS must return results");
+    assert!(
+        results[0]["vector"].is_null(),
+        "include_vector=false must omit the vector, got {}",
+        results[0]["vector"]
+    );
+    assert!(
+        results[0]["text"].is_string(),
+        "vector-light FTS hits still carry text"
+    );
+
+    // 8. Hybrid with include_vector=false — same projection through
+    //    the RRF fusion path.
+    let hybrid_light_body = json!({
+        "vector": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "text": "lazy",
+        "k": 4,
+        "include_vector": false
+    });
+    let (status, body) = post_json(app.clone(), format!("/ns/{ns}/query"), hybrid_light_body).await;
+    assert_eq!(status, StatusCode::OK, "vector-light hybrid query status");
+    let results = body["results"].as_array().expect("results array");
+    assert!(
+        !results.is_empty(),
+        "vector-light hybrid must return results"
+    );
+    assert_eq!(
+        results[0]["id"], 1,
+        "projection must not change the hybrid ranking"
+    );
+    assert!(
+        results[0]["vector"].is_null(),
+        "include_vector=false must omit the vector on hybrid hits, got {}",
+        results[0]["vector"]
+    );
 }
