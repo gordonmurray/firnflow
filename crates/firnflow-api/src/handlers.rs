@@ -120,7 +120,7 @@ pub struct UpsertRequest {
 /// Body of a successful upsert response.
 #[derive(Debug, Serialize)]
 pub struct UpsertResponse {
-    /// Number of rows accepted for append. Matches `rows.len()` on the
+    /// Number of rows accepted for upsert. Matches `rows.len()` on the
     /// request — there is no per-row failure reporting yet.
     pub upserted: usize,
 }

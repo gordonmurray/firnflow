@@ -162,7 +162,7 @@ curl -X POST http://localhost:3000/ns/demo/upsert \
      }'
 ```
 
-Rows are appended. Re-sending a row whose `id` already exists adds another row rather than replacing the old one; idempotent upsert by `id` is planned (tracked in [#31](https://github.com/gordonmurray/firnflow/issues/31)).
+Upsert is keyed by `id` and is latest-write-wins: re-sending a row whose `id` already exists replaces the stored row in full rather than adding a second copy, so retries and genuine updates are both safe. Ids must be unique within a single request. The `_ingested_at` timestamp tracks the most recent write to a row, not its first insert.
 
 ### 3. Perform a Search
 Query the same namespace for the nearest neighbor:
@@ -216,7 +216,7 @@ curl -X POST http://localhost:3000/ns/demo/upsert \
 | `/metrics` | `GET` | metrics or open | Prometheus exposition format |
 | `/ns/{ns}` | `GET` | read/write | Namespace metadata (row count, fragment count, indexes, table version); 404 if it has no data yet |
 | `/ns/{ns}` | `DELETE` | admin | Removes all data (object storage + cache) for a namespace |
-| `/ns/{ns}/upsert` | `POST` | read/write | Append vectors and data (not deduplicated by `id`) |
+| `/ns/{ns}/upsert` | `POST` | read/write | Insert or update vectors and data (latest-write-wins by `id`) |
 | `/ns/{ns}/query` | `POST` | read/write | Vector, FTS, or hybrid search |
 | `/ns/{ns}/list` | `GET` | read/write | Cursor-paginated list ordered by `_ingested_at` |
 | `/ns/{ns}/warmup` | `POST` | read/write | Non-blocking cache pre-warm hint |

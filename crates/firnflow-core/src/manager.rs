@@ -29,10 +29,11 @@
 //!
 //! The pool is invalidated on namespace delete and on operations
 //! that change the table's manifest (index build, compaction). A
-//! regular append-only upsert does **not** evict — Lance appends
-//! are visible through the existing handle.
+//! regular upsert does **not** evict — a merge-insert write commits
+//! through the cached handle and its result is visible to subsequent
+//! reads on that same handle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -489,7 +490,8 @@ impl NamespaceManager {
         Ok(None)
     }
 
-    /// Append rows to the namespace's table.
+    /// Insert or update rows in the namespace's table, keyed by `id`
+    /// (latest-write-wins).
     ///
     /// On a fresh namespace the vector kind and dimension are
     /// inferred from the first row's payload (a non-empty `vector`
@@ -498,6 +500,21 @@ impl NamespaceManager {
     /// in the request are validated against the inferred shape. On
     /// an existing namespace the kind and dimension are read from
     /// the Lance table schema; every row must match.
+    ///
+    /// Rows are merged by `id` via LanceDB's merge-insert: a row whose
+    /// `id` already exists replaces the stored row in full (vector,
+    /// text, and `_ingested_at`), and a row whose `id` is new is
+    /// inserted. Replaying the same request is therefore idempotent
+    /// from the caller's point of view, and `_ingested_at` reflects
+    /// the most recent write rather than the first insert. The merge
+    /// finds matches by scanning for `id`; there is no scalar index on
+    /// `id` yet, so writes to a large namespace pay a full-fragment
+    /// scan per batch (see issue #66 for the planned auto-built BTree).
+    ///
+    /// Lance leaves merge behaviour undefined when several source rows
+    /// match the same target row, so duplicate ids within a single
+    /// request are rejected with [`FirnflowError::InvalidRequest`]
+    /// before any write.
     pub async fn upsert(
         &self,
         ns: &NamespaceId,
@@ -507,10 +524,24 @@ impl NamespaceManager {
             return Ok(());
         }
 
+        // Reject duplicate ids within the request: merge-insert is
+        // undefined when more than one source row matches the same
+        // target row, so a request that contains its own duplicate
+        // would have ambiguous semantics. Catch it before the write.
+        let mut seen_ids = HashSet::with_capacity(rows.len());
+        for row in &rows {
+            if !seen_ids.insert(row.id) {
+                return Err(FirnflowError::InvalidRequest(format!(
+                    "duplicate id {} in upsert request; ids must be unique within a single request",
+                    row.id
+                )));
+            }
+        }
+
         // Determine schema facts: cached → live schema → infer for
         // a fresh namespace. Fresh namespaces always get the current
         // schema (with `_ingested_at`); pre-upgrade tables keep their
-        // legacy shape so appends continue to work.
+        // legacy shape so writes continue to match.
         let info = match self.resolve_schema_info(ns).await? {
             Some(info) => info,
             None => {
@@ -530,15 +561,24 @@ impl NamespaceManager {
             validate_row_against(row, info.kind, info.dim)?;
         }
 
+        // `get_or_open_table` creates an empty table for a fresh
+        // namespace, so by here the table always exists. Merge-insert
+        // then handles both cases uniformly: into an empty table every
+        // row is "not matched" and inserted; into a populated table
+        // matched ids are replaced and new ids inserted.
         let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
         let schema = Self::schema_for_kind(info.kind, info.dim, info.has_ingested_at);
         let batch = rows_to_batch(&schema, info.kind, info.dim, rows, info.has_ingested_at)?;
         let reader: Box<dyn RecordBatchReader + Send> =
             Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema));
-        tbl.add(reader)
-            .execute()
+        let mut merge = tbl.merge_insert(&["id"]);
+        merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all();
+        merge
+            .execute(reader)
             .await
-            .map_err(|e| FirnflowError::Backend(format!("table.add: {e}")))?;
+            .map_err(|e| FirnflowError::Backend(format!("table.merge_insert: {e}")))?;
 
         self.schema_info.insert(ns.clone(), info);
         Ok(())
@@ -1508,9 +1548,10 @@ fn rows_to_batch(
 
     if include_ingested_at {
         // Stamp every row in the batch with the same server-side
-        // timestamp. Because Lance appends are immutable, this
-        // becomes the row's permanent "arrival" time — first-write
-        // semantics fall out of the append-only model for free.
+        // write timestamp. Merge-insert replaces all columns of a
+        // matched row, so re-upserting an existing id advances this
+        // value: it records the most recent write, not the first
+        // insert.
         let ts = current_micros();
         let ts_array = TimestampMicrosecondArray::from_iter_values(std::iter::repeat_n(ts, n));
         columns.push(Arc::new(ts_array) as ArrayRef);

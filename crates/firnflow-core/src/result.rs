@@ -36,8 +36,9 @@ pub struct QueryResult {
     /// column and the row was upserted with text.
     #[serde(default)]
     pub text: Option<String>,
-    /// Server-side timestamp (microseconds since Unix epoch) the row
-    /// was written — the same `_ingested_at` value `/list` returns.
+    /// Server-side timestamp (microseconds since Unix epoch) of the
+    /// most recent write to the row — the same `_ingested_at` value
+    /// `/list` returns; a re-upsert of the same `id` advances it.
     /// `None` for namespaces created before the column existed.
     #[serde(default)]
     pub ingested_at_micros: Option<i64>,
@@ -78,9 +79,10 @@ pub struct ListRow {
     /// The stored text for this row, if any.
     #[serde(default)]
     pub text: Option<String>,
-    /// Server-side timestamp (microseconds since Unix epoch) the
-    /// row was first written. Immutable for the life of the row —
-    /// Lance appends never rewrite it.
+    /// Server-side timestamp (microseconds since Unix epoch) of the
+    /// most recent write to this row. Re-upserting the same `id`
+    /// replaces the row and advances this value, so it reflects the
+    /// latest write rather than the first insert.
     pub ingested_at_micros: i64,
 }
 
@@ -109,9 +111,10 @@ pub struct NamespaceInfo {
     /// Vector dimension. For multivector namespaces this is the inner
     /// sub-vector width.
     pub vector_dim: usize,
-    /// Live row count (`Table::count_rows`). Note that without
-    /// idempotent upsert (see issue #31), re-sending a row id appends
-    /// another row, so this counts physical rows, not distinct ids.
+    /// Live row count (`Table::count_rows`). Upsert is keyed by `id`
+    /// (latest-write-wins), so re-sending an existing id replaces the
+    /// row rather than adding one; this is the count of distinct live
+    /// ids.
     pub row_count: usize,
     /// Number of Lance data fragments. A growing count is the signal
     /// to `POST /ns/{namespace}/compact`.

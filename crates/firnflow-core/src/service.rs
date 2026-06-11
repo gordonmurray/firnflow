@@ -120,12 +120,12 @@ impl NamespaceService {
         &self.semantic
     }
 
-    /// Write path: append rows via the manager. The append advances
-    /// the Lance table version, which is the cache generation, so the
-    /// next read derives a new generation and every result cached
-    /// against the pre-write version becomes unreachable — no explicit
-    /// cache bump is needed. Because the version only moves on a
-    /// successful commit, a failed append leaves the cache
+    /// Write path: upsert rows via the manager (merge-insert by `id`).
+    /// The write advances the Lance table version, which is the cache
+    /// generation, so the next read derives a new generation and every
+    /// result cached against the pre-write version becomes unreachable
+    /// — no explicit cache bump is needed. Because the version only
+    /// moves on a successful commit, a failed write leaves the cache
     /// self-consistent (it keeps serving the pre-failure results). The
     /// semantic sidecar is cleared eagerly to free memory rather than
     /// wait for its lazy generation-mismatch drop on the next lookup.

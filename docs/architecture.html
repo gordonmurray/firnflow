@@ -100,8 +100,8 @@ handler</code></pre>
     <h2>Write path</h2>
     <p>Writes follow a strict ordering to prevent stale cache state:</p>
     <ol>
-      <li><strong>Append to object storage.</strong> Rows are appended to the namespace's Lance table via LanceDB's native append API.</li>
-      <li><strong>Invalidation is intrinsic.</strong> A successful append advances the Lance table version, so the next read derives a new generation and every entry cached against the prior version becomes unreachable by key. There is no separate invalidation step to forget.</li>
+      <li><strong>Merge-insert into object storage.</strong> Rows are written to the namespace's Lance table via LanceDB's merge-insert, keyed by <code>id</code>: an existing id is replaced in full (latest-write-wins) and a new id is inserted.</li>
+      <li><strong>Invalidation is intrinsic.</strong> A successful write advances the Lance table version, so the next read derives a new generation and every entry cached against the prior version becomes unreachable by key. There is no separate invalidation step to forget.</li>
       <li><strong>Record metrics.</strong> <code>write_duration_seconds</code> and <code>s3_requests_total{operation=upsert}</code> are updated.</li>
     </ol>
     <p>This is automatic and safe: the version only advances on a committed write, so a failed write leaves the generation &mdash; and therefore the cache &mdash; untouched with valid data. There is no window where the cache is empty and queries would storm the backend.</p>
@@ -138,7 +138,7 @@ handler</code></pre>
       <li><code>POST /ns/{ns}/index</code> and <code>/fts-index</code> &mdash; manifest bumped, handle evicted</li>
       <li><code>POST /ns/{ns}/compact</code> &mdash; fragment offsets change, handle evicted</li>
     </ul>
-    <p>Ordinary upserts do <strong>not</strong> evict the handle. Lance appends are visible through the existing handle, so there is no need to reopen the table on every write.</p>
+    <p>Ordinary upserts do <strong>not</strong> evict the handle. A merge-insert write commits through the cached handle and its result is visible to subsequent reads on that same handle, so there is no need to reopen the table on every write.</p>
 
     <p>Pool occupancy is exposed as the <code>firnflow_cached_handles</code> gauge at <code>/metrics</code>. Compare it against <code>firnflow_active_namespaces</code> to see how many namespaces are currently paying the cold-open cost.</p>
 
