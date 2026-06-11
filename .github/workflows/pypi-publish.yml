@@ -1,0 +1,122 @@
+# Build and publish the `firn` Python package (crate at python/) to PyPI.
+#
+# Triggers on its own tag scheme, firn-v* (e.g. firn-v0.1.0), kept
+# separate from the server's v* tags so the package releases on its own
+# cadence and a server release never tries to re-push the same firn
+# version (PyPI rejects duplicate versions).
+#
+# Flow: build the wheel matrix + sdist -> publish to TestPyPI
+# automatically -> publish to PyPI behind a GitHub Environment approval
+# gate. Authentication is PyPI Trusted Publishing (OIDC); no token is
+# stored in the repo.
+name: pypi-publish
+
+on:
+  push:
+    tags:
+      - "firn-v*"
+
+# Default: read-only (lets the build/sdist jobs check out). The publish
+# jobs override this with `id-token: write` for OIDC trusted publishing.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.platform.os }} ${{ matrix.platform.target }})
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is intentionally omitted for v0.1: embedded local mode
+        # builds a Unix-shaped `file://` URI that is not valid on Windows
+        # (drive letters / backslashes), and it can't be tested from the
+        # build host. Linux + macOS cover the large majority of installs.
+        platform:
+          - { os: ubuntu-latest, target: x86_64, manylinux: "2_28" }
+          - { os: ubuntu-latest, target: aarch64, manylinux: "2_28" }
+          - { os: macos-latest, target: universal2-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      # abi3-py310 means one wheel per platform serves every Python >= 3.10.
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux || 'auto' }}
+          args: --release --strip --out dist -m python/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: dist
+
+  sdist:
+    name: build sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist -m python/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  smoke:
+    name: smoke-test the linux wheel
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-ubuntu-latest-x86_64
+          path: dist
+      - name: Install the built wheel and pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          python -m pip install --no-index --find-links dist firn
+      - name: Run the suite against the installed wheel
+        run: pytest python/tests -q
+
+  testpypi:
+    name: publish to TestPyPI
+    needs: [build, sdist, smoke]
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write # OIDC for trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  pypi:
+    name: publish to PyPI
+    needs: [testpypi]
+    runs-on: ubuntu-latest
+    # The `pypi` environment carries the required-reviewer rule, so this
+    # job waits for a manual approval in the Actions UI before it runs.
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
