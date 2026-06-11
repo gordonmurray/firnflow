@@ -297,6 +297,9 @@ fn build_storage_options_for(scheme: Scheme) -> HashMap<String, String> {
     match scheme {
         Scheme::S3 => build_s3_storage_options(),
         Scheme::Gcs => build_gcs_storage_options(),
+        // Local filesystem mode needs no credentials or endpoint
+        // options; the directory is carried in the storage root.
+        Scheme::Local => HashMap::new(),
     }
 }
 

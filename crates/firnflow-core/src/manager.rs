@@ -54,6 +54,7 @@ use lancedb::table::OptimizeAction;
 use lancedb::DistanceType;
 use object_store::aws::AmazonS3Builder;
 use object_store::gcp::GoogleCloudStorageBuilder;
+use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectStorePath;
 use object_store::ObjectStore;
 use xxhash_rust::xxh3::xxh3_64;
@@ -631,7 +632,27 @@ impl NamespaceManager {
         match self.storage_root.scheme() {
             Scheme::S3 => self.build_s3_object_store(),
             Scheme::Gcs => self.build_gcs_object_store(),
+            Scheme::Local => self.build_local_object_store(),
         }
+    }
+
+    /// Build a local-filesystem `object_store` client rooted at the
+    /// configured base directory (embedded mode). Used by the namespace
+    /// delete path, which lists and removes objects under the namespace
+    /// prefix; the read/write path opens local Lance tables directly
+    /// through `lancedb::connect` with the `file://` URI.
+    ///
+    /// The base directory is created if absent so that
+    /// `LocalFileSystem::new_with_prefix` — which canonicalises the
+    /// prefix and requires it to exist — succeeds even before any
+    /// namespace has been written.
+    fn build_local_object_store(&self) -> Result<Arc<dyn ObjectStore>, FirnflowError> {
+        let dir = self.storage_root.bucket();
+        std::fs::create_dir_all(dir)
+            .map_err(|e| FirnflowError::Backend(format!("create local storage dir {dir}: {e}")))?;
+        let store = LocalFileSystem::new_with_prefix(dir)
+            .map_err(|e| FirnflowError::Backend(format!("build local object store: {e}")))?;
+        Ok(Arc::new(store))
     }
 
     fn build_s3_object_store(&self) -> Result<Arc<dyn ObjectStore>, FirnflowError> {
