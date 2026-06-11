@@ -138,7 +138,7 @@ handler</code></pre>
       <li><code>POST /ns/{ns}/index</code> and <code>/fts-index</code> &mdash; manifest bumped, handle evicted</li>
       <li><code>POST /ns/{ns}/compact</code> &mdash; fragment offsets change, handle evicted</li>
     </ul>
-    <p>Ordinary upserts do <strong>not</strong> evict the handle. Lance appends are visible through the existing handle, so there is no need to reopen the table on every write.</p>
+    <p>Ordinary upserts do <strong>not</strong> evict the handle. A merge-insert write commits through the cached handle and its result is visible to subsequent reads on that same handle, so there is no need to reopen the table on every write.</p>
 
     <p>Pool occupancy is exposed as the <code>firnflow_cached_handles</code> gauge at <code>/metrics</code>. Compare it against <code>firnflow_active_namespaces</code> to see how many namespaces are currently paying the cold-open cost.</p>
 

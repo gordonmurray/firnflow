@@ -29,8 +29,9 @@
 //!
 //! The pool is invalidated on namespace delete and on operations
 //! that change the table's manifest (index build, compaction). A
-//! regular append-only upsert does **not** evict — Lance appends
-//! are visible through the existing handle.
+//! regular upsert does **not** evict — a merge-insert write commits
+//! through the cached handle and its result is visible to subsequent
+//! reads on that same handle.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

@@ -113,6 +113,10 @@
       <div class="endpoint-body">
         <p>Inserts or updates rows in the namespace's Lance table, keyed by <code>id</code>. The vector dimension and the vector kind (single-vector or multivector) are inferred from the first upsert and enforced on subsequent calls. After a successful write, all cached query results for this namespace are invalidated.</p>
         <p>Upsert is latest-write-wins: re-sending a row whose <code>id</code> already exists replaces the stored row in full (vector, text, and the <code>_ingested_at</code> timestamp), so replaying a request and updating a document are both safe. A row with a new <code>id</code> is inserted. Because <code>_ingested_at</code> is rewritten on update, it reflects the most recent write to a row rather than its first insert. Duplicate ids within a single request are rejected with <code>400</code>.</p>
+        <div class="callout callout-warning">
+          <div class="callout-title">Upgrade note</div>
+          Idempotent upsert does not retroactively de-duplicate older data. A namespace that accumulated duplicate ids under earlier (append-only) versions keeps those rows, and merging into a target that already holds duplicate ids is undefined, so <code>/query</code> and <code>/list</code> can still surface them until those ids are cleared (delete and re-ingest, or wait on the dedupe pass tracked in issue #68). Namespaces written only by this release forward are unaffected.
+        </div>
 
         <p>Each row carries one of two vector payload shapes, depending on the namespace's kind:</p>
         <ul>
@@ -280,7 +284,7 @@
         <span class="endpoint-desc">Cursor-paginated list ordered by <code>_ingested_at</code></span>
       </div>
       <div class="endpoint-body">
-        <p>Returns rows in ingest order for "recent content" flows (landing pages, new-uploads feeds, back-catalogue browsing). Results are ordered by the reserved <code>_ingested_at</code> system column (microsecond server-side timestamp, set at first write and never mutated).</p>
+        <p>Returns rows in ingest order for "recent content" flows (landing pages, new-uploads feeds, back-catalogue browsing). Results are ordered by the reserved <code>_ingested_at</code> system column (microsecond server-side timestamp of the most recent write; re-upserting a row advances it).</p>
         <p>This endpoint intentionally bypasses the foyer cache. Pagination tails would push hot query results out of RAM and NVMe without an offsetting hit rate, so <code>/list</code> goes directly to the Lance dataset.</p>
 
         <h4>Query parameters</h4>
@@ -290,7 +294,7 @@
             <tr><td><code>order_by</code></td><td><code>_ingested_at</code></td><td>V1 supports the reserved system column only; other values return 400. User-column ordering will follow scalar-index support. Build the BTree via <code>POST /ns/{namespace}/scalar-index</code> to remove the full-fragment scan cost on large namespaces.</td></tr>
             <tr><td><code>order</code></td><td><code>desc</code></td><td><code>asc</code> or <code>desc</code>.</td></tr>
             <tr><td><code>limit</code></td><td>50</td><td>Rows per page. Hard-capped at 500.</td></tr>
-            <tr><td><code>cursor</code></td><td>none</td><td>Opaque token from the previous response's <code>next_cursor</code>. Value-based, survives concurrent writes. Format is implementation-defined — do not parse or construct by hand.</td></tr>
+            <tr><td><code>cursor</code></td><td>none</td><td>Opaque token from the previous response's <code>next_cursor</code>. Value-based on <code>(_ingested_at, id)</code>, so rows appended during pagination are handled cleanly. Note that re-upserting a row advances its <code>_ingested_at</code>, which can move it across the cursor boundary mid-pagination, so an updated row may be skipped or repeated across pages. Format is implementation-defined — do not parse or construct by hand.</td></tr>
           </tbody>
         </table>
 
