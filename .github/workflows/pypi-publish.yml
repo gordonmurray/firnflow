@@ -141,6 +141,9 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          # A re-run, or a later tag rebuilding an already-released
+          # version, should not fail the pipeline on a duplicate upload.
+          skip-existing: true
 
   pypi:
     name: publish to PyPI
@@ -157,3 +160,5 @@ jobs:
           path: dist
           merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
