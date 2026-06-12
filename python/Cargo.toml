@@ -1,0 +1,23 @@
+[package]
+name = "firnflow-python"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "PyO3 bindings exposing the firnflow engine as the `firn` Python package."
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+# No Rust test harness for this crate: the behaviour is covered by the
+# pytest suite (python/tests), and a `cargo test` harness for a
+# `cdylib` + `extension-module` crate needs to link libpython, which the
+# workspace-wide `cargo test` in CI must not depend on. Doctests are off
+# for the same reason.
+test = false
+doctest = false
+
+[dependencies]
+firnflow-core = { path = "../crates/firnflow-core" }
+pyo3 = { version = "0.25", features = ["abi3-py310", "extension-module"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-util", "time", "net", "fs"] }

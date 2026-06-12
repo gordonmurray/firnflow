@@ -4,6 +4,7 @@ members = [
     "crates/firnflow-core",
     "crates/firnflow-api",
     "crates/firnflow-bench",
+    "python",
 ]
 
 [workspace.package]

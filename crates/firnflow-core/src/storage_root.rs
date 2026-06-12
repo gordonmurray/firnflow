@@ -1,14 +1,16 @@
 //! Backend-agnostic storage root.
 //!
 //! A [`StorageRoot`] captures the parsed shape of a Firn deployment's
-//! object-storage URI: which scheme (`s3`, `gs`), which bucket, and
-//! optionally a fixed prefix that every namespace lives under. The
+//! object-storage URI: which scheme (`s3`, `gs`, or `file`), which
+//! bucket (or local directory, for `file`), and optionally a fixed
+//! prefix that every namespace lives under. The
 //! type is the single hand-off between operator config (the
 //! `FIRNFLOW_STORAGE_URI` / `FIRNFLOW_S3_BUCKET` env vars) and the
 //! parts of `firnflow-core` that need to construct namespace URIs and
 //! `object_store` clients.
 //!
-//! Both `s3://` and `gs://` are routable schemes. The actual
+//! `s3://`, `gs://`, and `file://` (a local filesystem directory, for
+//! embedded mode) are routable schemes. The actual
 //! `object_store` client and lancedb backend are picked by
 //! [`Scheme`] downstream — see `NamespaceManager::build_object_store`
 //! for the dispatch. GCS routing uses the native
@@ -20,6 +22,8 @@
 //! prefixes are stored as `None`, never as `Some("")`. This makes
 //! equality of two parsed roots a meaningful "operator pointed both
 //! env vars at the same place" check.
+
+use std::path::{Path, PathBuf};
 
 use crate::error::FirnflowError;
 use crate::namespace::NamespaceId;
@@ -44,6 +48,13 @@ pub enum Scheme {
     /// drops into `object_store::gcp::GoogleCloudStorage` keyed off
     /// the same credentials.
     Gcs,
+    /// Local filesystem directory, for embedded mode (no network, no
+    /// credentials). The `bucket` field of a [`StorageRoot`] with this
+    /// scheme holds the absolute base directory; each namespace is a
+    /// subdirectory beneath it that `lancedb::connect` opens as a local
+    /// Lance table via a `file://` URI, and the delete path lists and
+    /// removes objects through `object_store::local::LocalFileSystem`.
+    Local,
 }
 
 impl Scheme {
@@ -53,6 +64,7 @@ impl Scheme {
         match self {
             Scheme::S3 => "s3",
             Scheme::Gcs => "gs",
+            Scheme::Local => "file",
         }
     }
 }
@@ -75,14 +87,18 @@ pub struct StorageRoot {
 
 impl StorageRoot {
     /// Parse a URI of the form `scheme://bucket[/prefix...]`.
-    /// Supported schemes are `s3` (any S3-compatible backend) and
-    /// `gs` (native Google Cloud Storage).
+    /// Supported schemes are `s3` (any S3-compatible backend),
+    /// `gs` (native Google Cloud Storage), and `file` (a local
+    /// filesystem directory for embedded mode, e.g.
+    /// `file:///srv/firn_data`; the path is resolved to an absolute
+    /// directory via [`StorageRoot::local`]).
     ///
     /// # Errors
     ///
     /// - `InvalidRequest` if the URI is empty, missing the `://`
     ///   separator, or has an empty bucket segment.
-    /// - `InvalidRequest` if the scheme is neither `s3` nor `gs`.
+    /// - `InvalidRequest` if the scheme is not one of `s3`, `gs`,
+    ///   `file`.
     pub fn parse(uri: &str) -> Result<Self, FirnflowError> {
         let uri = uri.trim();
         if uri.is_empty() {
@@ -99,10 +115,14 @@ impl StorageRoot {
         let scheme = match scheme_part {
             "s3" => Scheme::S3,
             "gs" => Scheme::Gcs,
+            // Local filesystem: the remainder is a directory path, not a
+            // `bucket/prefix` pair, so route straight to `local` and skip
+            // the bucket/prefix split below.
+            "file" => return Self::local(rest),
             other => {
                 return Err(FirnflowError::InvalidRequest(format!(
                     "storage URI {uri:?} uses unrecognised scheme {other:?}; \
-                     supported schemes are s3, gs"
+                     supported schemes are s3, gs, file"
                 )));
             }
         };
@@ -146,6 +166,37 @@ impl StorageRoot {
         Ok(StorageRoot {
             scheme: Scheme::S3,
             bucket: trimmed.to_string(),
+            prefix: None,
+        })
+    }
+
+    /// Construct a local-filesystem storage root from a directory
+    /// path, for embedded mode.
+    ///
+    /// The path is resolved to an absolute path (relative paths are
+    /// joined onto the current working directory) so that the
+    /// `file://` URI handed to `lancedb::connect` and the local
+    /// `object_store` client agree regardless of the process's working
+    /// directory. The directory need not exist yet — embedded
+    /// namespace state is lazy until the first write. The resulting
+    /// `bucket` field holds the absolute directory and `prefix` is
+    /// always `None`.
+    ///
+    /// # Errors
+    ///
+    /// - `InvalidRequest` if the path is empty or not valid UTF-8.
+    /// - `Io` if the current working directory cannot be read while
+    ///   resolving a relative path.
+    pub fn local(dir: impl Into<PathBuf>) -> Result<Self, FirnflowError> {
+        let dir = dir.into();
+        if dir.as_os_str().is_empty() {
+            return Err(FirnflowError::InvalidRequest(
+                "local storage directory must not be empty".into(),
+            ));
+        }
+        Ok(StorageRoot {
+            scheme: Scheme::Local,
+            bucket: absolute_utf8_dir(&dir)?,
             prefix: None,
         })
     }
@@ -223,6 +274,31 @@ impl std::fmt::Display for StorageRoot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.as_uri())
     }
+}
+
+/// Resolve a directory path to an absolute, UTF-8 string without
+/// requiring it to exist on disk. Relative paths are joined onto the
+/// current working directory; the path is deliberately *not* run
+/// through `fs::canonicalize` (which requires the path to exist) so a
+/// not-yet-created `./firn_data` resolves cleanly — embedded namespace
+/// state is lazy until the first write. Trailing slashes are trimmed
+/// so `./firn_data` and `./firn_data/` produce equal roots, mirroring
+/// the trailing-slash canonicalisation the cloud parser applies.
+fn absolute_utf8_dir(dir: &Path) -> Result<String, FirnflowError> {
+    let abs: PathBuf = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(dir)
+    };
+    let s = abs.to_str().ok_or_else(|| {
+        FirnflowError::InvalidRequest(format!("local storage path {abs:?} is not valid UTF-8"))
+    })?;
+    let trimmed = s.trim_end_matches('/');
+    Ok(if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    })
 }
 
 #[cfg(test)]
@@ -316,7 +392,7 @@ mod tests {
     fn parse_rejects_unknown_scheme() {
         let err = StorageRoot::parse("ftp://my-bucket").unwrap_err();
         assert!(matches!(err, FirnflowError::InvalidRequest(_)));
-        let err = StorageRoot::parse("file:///tmp/foo").unwrap_err();
+        let err = StorageRoot::parse("http://my-bucket").unwrap_err();
         assert!(matches!(err, FirnflowError::InvalidRequest(_)));
     }
 
@@ -438,5 +514,75 @@ mod tests {
     fn display_matches_as_uri() {
         let root = StorageRoot::parse("s3://my-bucket/firn").unwrap();
         assert_eq!(format!("{root}"), root.as_uri());
+    }
+
+    #[test]
+    fn local_constructor_makes_relative_path_absolute() {
+        // A relative dir resolves against cwd; the dir need not exist.
+        let root = StorageRoot::local("firn_data").unwrap();
+        assert_eq!(root.scheme(), Scheme::Local);
+        assert!(
+            root.bucket().starts_with('/'),
+            "local bucket should be an absolute path, got {:?}",
+            root.bucket()
+        );
+        assert!(root.bucket().ends_with("/firn_data"));
+        assert_eq!(root.prefix(), None);
+    }
+
+    #[test]
+    fn local_keeps_absolute_path_as_is() {
+        let root = StorageRoot::local("/var/lib/firn").unwrap();
+        assert_eq!(root.bucket(), "/var/lib/firn");
+        assert_eq!(root.scheme(), Scheme::Local);
+    }
+
+    #[test]
+    fn local_trims_trailing_slash() {
+        let with = StorageRoot::local("/var/lib/firn/").unwrap();
+        let without = StorageRoot::local("/var/lib/firn").unwrap();
+        assert_eq!(with, without);
+        assert_eq!(with.bucket(), "/var/lib/firn");
+    }
+
+    #[test]
+    fn local_rejects_empty() {
+        assert!(matches!(
+            StorageRoot::local("").unwrap_err(),
+            FirnflowError::InvalidRequest(_)
+        ));
+    }
+
+    #[test]
+    fn parse_file_scheme_is_local_and_absolute() {
+        let root = StorageRoot::parse("file:///srv/firn_data").unwrap();
+        assert_eq!(root.scheme(), Scheme::Local);
+        assert_eq!(root.bucket(), "/srv/firn_data");
+        assert_eq!(root.prefix(), None);
+    }
+
+    #[test]
+    fn local_namespace_uri_is_a_file_url() {
+        let root = StorageRoot::local("/srv/firn_data").unwrap();
+        assert_eq!(
+            root.namespace_uri(&ns("docs")),
+            "file:///srv/firn_data/docs"
+        );
+    }
+
+    #[test]
+    fn local_namespace_object_path_is_relative() {
+        // The local object store is rooted at the base dir, so the
+        // per-namespace path is just the namespace name.
+        let root = StorageRoot::local("/srv/firn_data").unwrap();
+        assert_eq!(root.namespace_object_path(&ns("docs")), "docs");
+    }
+
+    #[test]
+    fn local_round_trips_through_parse() {
+        let root = StorageRoot::local("/srv/firn_data").unwrap();
+        let rendered = root.as_uri();
+        assert_eq!(rendered, "file:///srv/firn_data");
+        assert_eq!(StorageRoot::parse(&rendered).unwrap(), root);
     }
 }

@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Run maturin inside the pinned Rust + maturin dev container.
+#
+# Mirrors scripts/cargo: bind-mounts the project at /work and reuses the
+# shared cargo registry/git cache and build target so the PyO3 wheel
+# build stays incremental. maturin lives in the dev image (see
+# Dockerfile.dev); pyo3's build script and maturin both find the
+# container's python3.
+#
+# Typical use:
+#   ./scripts/maturin build -m python/Cargo.toml -o target/wheels
+#   ./scripts/maturin --version
+
+set -Eeuo pipefail
+
+IMAGE="firnflow-rust-dev:1.94"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+    echo "Building ${IMAGE} (first run only)..." >&2
+    docker build -t "${IMAGE}" -f "${PROJECT_ROOT}/Dockerfile.dev" "${PROJECT_ROOT}" >&2
+fi
+
+mkdir -p "${PROJECT_ROOT}/.cargo-cache"
+
+exec docker run --rm --init \
+    --user "$(id -u):$(id -g)" \
+    -v "${PROJECT_ROOT}:/work" \
+    -e CARGO_HOME=/work/.cargo-cache \
+    -e CARGO_TARGET_DIR=/work/target \
+    -e CARGO_TERM_COLOR=always \
+    -w /work \
+    "${IMAGE}" \
+    maturin "$@"

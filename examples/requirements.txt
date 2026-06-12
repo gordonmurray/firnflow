@@ -1,0 +1,10 @@
+# Installed by setup.sh. torch + torchvision are the CPU builds, from a
+# separate index (and must come from the same index to match):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+open_clip_torch
+scikit-image
+pillow
+boto3
+firn  # from the local wheel in ../target/wheels

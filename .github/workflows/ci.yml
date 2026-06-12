@@ -13,6 +13,13 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
+  # Strip debug info from CI builds. It is the dominant contributor to
+  # target/ size for the lance + datafusion + arrow graph, and with a
+  # fourth workspace member (the python cdylib) linking that graph the
+  # runner's ~14 GB margin no longer holds. Backtraces are already set
+  # to "short", so there is nothing to lose here.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
   # Tests fall back to these defaults when the env vars are not set,
   # matching docker-compose.yml for local parity. Setting them
   # explicitly in CI makes the wiring visible at a glance.
@@ -37,7 +44,10 @@ jobs:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
         with:
-          tool-cache: false
+          # The Rust toolchain is installed fresh below via dtolnay, so
+          # the preinstalled language tool-cache is dead weight here.
+          # Reclaiming it buys ~8 GB.
+          tool-cache: true
           android: true
           dotnet: true
           haskell: true

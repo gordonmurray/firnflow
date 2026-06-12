@@ -7,6 +7,10 @@
 #
 # Also installs protobuf-compiler because `lance-encoding` (pulled in
 # transitively by `lancedb`) has a build.rs that shells out to `protoc`.
+#
+# Python3 + maturin are here for the `firn` PyO3 bindings crate
+# (`python/`): pyo3's build script probes for a Python interpreter, and
+# maturin builds the importable extension / wheel.
 
 FROM rust:1.94-bookworm
 
@@ -14,6 +18,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         protobuf-compiler \
         libprotobuf-dev \
+        python3 \
+        python3-pip \
+        python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 RUN rustup component add rustfmt clippy
+
+# maturin builds the `firn` wheel from the PyO3 crate. pip's PEP 668
+# guard is bypassed because this is a throwaway dev image.
+RUN pip3 install --no-cache-dir --break-system-packages 'maturin>=1.7,<2'

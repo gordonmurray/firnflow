@@ -4,3 +4,9 @@
 .DS_Store
 .env
 .env.local
+
+# Python examples: local virtualenv, demo data, byte-code caches
+/examples/.venv
+/examples/firn_data_demo
+__pycache__/
+*.pyc
