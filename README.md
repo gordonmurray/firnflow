@@ -115,6 +115,8 @@ FIRNFLOW_S3_REGION=eu-west-1
 # AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, ~/.aws/credentials).
 ```
 
+`FIRNFLOW_S3_REGION` is optional: if it is unset, Firn falls back to the standard `AWS_REGION`, then `AWS_DEFAULT_REGION`, and only then to `us-east-1`. Set `FIRNFLOW_S3_REGION` to pin the region for Firn explicitly, or rely on the `AWS_*` variables your host already exports (the usual case on EC2/ECS). A region that does not match the bucket's region fails the request, so this matters for any backend that enforces region (real AWS S3 does; MinIO and most emulators ignore it).
+
 ### MinIO (local / self-hosted)
 
 ```bash

@@ -301,12 +301,110 @@ fn absolute_utf8_dir(dir: &Path) -> Result<String, FirnflowError> {
     })
 }
 
+/// Resolve the S3 region from the environment, honouring firnflow's
+/// explicit override first and then the standard AWS SDK variables.
+///
+/// Precedence, highest first:
+///
+/// 1. `FIRNFLOW_S3_REGION` — the explicit firnflow knob, so an
+///    operator can pin the region for Firn without disturbing the
+///    ambient AWS region the rest of a host's tooling reads.
+/// 2. `AWS_REGION` — the standard AWS SDK variable.
+/// 3. `AWS_DEFAULT_REGION` — the SDK's lower-priority fallback.
+/// 4. `us-east-1` — a final default. It is a no-op for MinIO and
+///    other emulators (which ignore the region) but is still set
+///    because `object_store`'s S3 builder expects a region.
+///
+/// The `AWS_REGION`-over-`AWS_DEFAULT_REGION` order matches the AWS
+/// SDK's own resolution, so a host configured the conventional way —
+/// the case on EC2/ECS, where `AWS_REGION` is exported by the
+/// environment — works without an extra firnflow-specific variable.
+/// Empty or whitespace-only values are skipped, so an accidental
+/// `AWS_REGION=` export does not shadow a lower-priority source.
+///
+/// `get` looks a variable up by name; production callers pass
+/// `|k| std::env::var(k).ok()`. Threading the lookup through a
+/// closure keeps the precedence logic pure and unit-testable without
+/// mutating process-global environment state.
+pub fn resolve_s3_region(get: impl Fn(&str) -> Option<String>) -> String {
+    for key in ["FIRNFLOW_S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"] {
+        if let Some(value) = get(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    "us-east-1".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn ns(name: &str) -> NamespaceId {
         NamespaceId::new(name).unwrap()
+    }
+
+    /// Build an env lookup closure backed by a fixed map, so the
+    /// region-precedence tests never touch process-global env state.
+    fn env_lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k: &str| map.get(k).cloned()
+    }
+
+    #[test]
+    fn region_defaults_to_us_east_1_when_nothing_set() {
+        assert_eq!(resolve_s3_region(env_lookup(&[])), "us-east-1");
+    }
+
+    #[test]
+    fn region_reads_aws_region_when_firnflow_unset() {
+        let env = env_lookup(&[("AWS_REGION", "eu-west-1")]);
+        assert_eq!(resolve_s3_region(env), "eu-west-1");
+    }
+
+    #[test]
+    fn region_reads_aws_default_region_as_lowest_aws_fallback() {
+        let env = env_lookup(&[("AWS_DEFAULT_REGION", "ap-southeast-2")]);
+        assert_eq!(resolve_s3_region(env), "ap-southeast-2");
+    }
+
+    #[test]
+    fn aws_region_wins_over_aws_default_region() {
+        let env = env_lookup(&[
+            ("AWS_REGION", "eu-west-1"),
+            ("AWS_DEFAULT_REGION", "us-west-2"),
+        ]);
+        assert_eq!(resolve_s3_region(env), "eu-west-1");
+    }
+
+    #[test]
+    fn firnflow_var_overrides_both_aws_vars() {
+        let env = env_lookup(&[
+            ("FIRNFLOW_S3_REGION", "eu-central-1"),
+            ("AWS_REGION", "eu-west-1"),
+            ("AWS_DEFAULT_REGION", "us-west-2"),
+        ]);
+        assert_eq!(resolve_s3_region(env), "eu-central-1");
+    }
+
+    #[test]
+    fn empty_value_does_not_shadow_lower_priority_source() {
+        // An exported-but-empty FIRNFLOW_S3_REGION must fall through
+        // to AWS_REGION rather than collapsing to the us-east-1 default.
+        let env = env_lookup(&[("FIRNFLOW_S3_REGION", "  "), ("AWS_REGION", "eu-west-1")]);
+        assert_eq!(resolve_s3_region(env), "eu-west-1");
+    }
+
+    #[test]
+    fn region_value_is_trimmed() {
+        let env = env_lookup(&[("AWS_REGION", " eu-west-1 ")]);
+        assert_eq!(resolve_s3_region(env), "eu-west-1");
     }
 
     #[test]

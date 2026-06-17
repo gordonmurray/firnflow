@@ -65,7 +65,7 @@
 //! | `FIRNFLOW_S3_ENDPOINT`             | (real AWS)                             |
 //! | `FIRNFLOW_S3_ACCESS_KEY`           | (default credential chain)             |
 //! | `FIRNFLOW_S3_SECRET_KEY`           | (default credential chain)             |
-//! | `FIRNFLOW_S3_REGION`               | `us-east-1`                            |
+//! | `FIRNFLOW_S3_REGION`               | `AWS_REGION` / `AWS_DEFAULT_REGION`, else `us-east-1` |
 //! | `FIRNFLOW_PROFILE_NAMESPACE`       | `first-query-profile`                  |
 //! | `FIRNFLOW_PROFILE_SEED`            | `true`                                 |
 //! | `FIRNFLOW_PROFILE_ROWS`            | `100000`                               |
@@ -187,7 +187,7 @@ impl Config {
         }
         opts.insert(
             "aws_region".into(),
-            env_or("FIRNFLOW_S3_REGION", "us-east-1"),
+            firnflow_core::resolve_s3_region(|k| std::env::var(k).ok()),
         );
 
         let backend_label = std::env::var("FIRNFLOW_PROFILE_BACKEND_LABEL")

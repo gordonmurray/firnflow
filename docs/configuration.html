@@ -85,7 +85,7 @@
     <p>For S3-family backends, the <code>FIRNFLOW_S3_*</code> variables below configure the endpoint and credentials. For native Google Cloud Storage, set <code>FIRNFLOW_STORAGE_URI=gs://&lt;bucket&gt;</code> and one of the standard <code>GOOGLE_*</code> credential variables — no other firnflow-specific configuration is required.</p>
 
     <h3>S3-family variables</h3>
-    <p>For real AWS S3, you typically only need <code>FIRNFLOW_STORAGE_URI</code> and <code>FIRNFLOW_S3_REGION</code>. Credentials come from the standard AWS chain (instance profile, environment, <code>~/.aws/credentials</code>).</p>
+    <p>For real AWS S3, you typically only need <code>FIRNFLOW_STORAGE_URI</code>. Credentials come from the standard AWS chain (instance profile, environment, <code>~/.aws/credentials</code>), and the region follows <code>AWS_REGION</code> / <code>AWS_DEFAULT_REGION</code> if you do not set <code>FIRNFLOW_S3_REGION</code> explicitly.</p>
 
     <table>
       <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
@@ -107,8 +107,8 @@
         </tr>
         <tr>
           <td><code>FIRNFLOW_S3_REGION</code></td>
-          <td><code>us-east-1</code></td>
-          <td>Region for the bucket. Some S3-compatible providers (R2, Tigris) accept <code>auto</code>.</td>
+          <td><code>AWS_REGION</code> / <code>AWS_DEFAULT_REGION</code>, else <code>us-east-1</code></td>
+          <td>Region for the bucket. If unset, Firn falls back to the standard <code>AWS_REGION</code>, then <code>AWS_DEFAULT_REGION</code>, then <code>us-east-1</code>. Set it to pin the region explicitly. Some S3-compatible providers (R2, Tigris) accept <code>auto</code>. A region that does not match the bucket fails the request on backends that enforce region (real AWS S3); MinIO and most emulators ignore it.</td>
         </tr>
       </tbody>
     </table>

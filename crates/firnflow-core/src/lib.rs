@@ -31,5 +31,5 @@ pub use query::{
 };
 pub use result::{ListOrder, ListPage, ListRow, NamespaceInfo, QueryResult, QueryResultSet};
 pub use service::{NamespaceService, QueryCacheSource, QueryOutcome};
-pub use storage_root::{Scheme, StorageRoot};
+pub use storage_root::{resolve_s3_region, Scheme, StorageRoot};
 pub use vector::VectorKind;

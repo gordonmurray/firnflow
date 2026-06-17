@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- S3 region resolution now honours the standard `AWS_REGION` and `AWS_DEFAULT_REGION` environment variables. Previously the region was read only from `FIRNFLOW_S3_REGION` and defaulted to `us-east-1` when that was unset, silently ignoring the `AWS_*` variables a host already exports — so a deployment in, say, `eu-west-1` that set `AWS_REGION` the conventional way still talked to `us-east-1` and failed against any backend that enforces region. Resolution order is now `FIRNFLOW_S3_REGION`, then `AWS_REGION`, then `AWS_DEFAULT_REGION`, then the `us-east-1` fallback (matching the AWS SDK's own `AWS_REGION`-over-`AWS_DEFAULT_REGION` precedence). Set `FIRNFLOW_S3_REGION` to pin the region explicitly; otherwise the ambient AWS region is picked up automatically. The same fix applies to the benchmark harnesses, which shared the old default.
+
 ## [0.9.0] - 2026-06-17
 
 ### Added

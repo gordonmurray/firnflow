@@ -40,7 +40,7 @@
 //! | `FIRNFLOW_S3_ENDPOINT`          | (real AWS)                                 |
 //! | `FIRNFLOW_S3_ACCESS_KEY`        | (default credential chain)                 |
 //! | `FIRNFLOW_S3_SECRET_KEY`        | (default credential chain)                 |
-//! | `FIRNFLOW_S3_REGION`            | `us-east-1`                                |
+//! | `FIRNFLOW_S3_REGION`            | `AWS_REGION` / `AWS_DEFAULT_REGION`, else `us-east-1` |
 //! | `FIRNFLOW_BENCH_DIM`            | `32`                                       |
 //! | `FIRNFLOW_BENCH_ROWS`           | `100`                                      |
 //! | `FIRNFLOW_BENCH_QUERIES`        | `50`                                       |
@@ -159,7 +159,7 @@ impl BenchConfig {
         }
         opts.insert(
             "aws_region".into(),
-            env_or("FIRNFLOW_S3_REGION", "us-east-1"),
+            firnflow_core::resolve_s3_region(|k| std::env::var(k).ok()),
         );
 
         Ok(Self {
