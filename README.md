@@ -1,6 +1,6 @@
 # Firn
 
-**Firn** is a multi-tenant vector and full-text search engine backed by object storage (AWS S3, MinIO, Cloudflare R2, Tigris, DigitalOcean Spaces, Google Cloud Storage). It is designed as a credible open-source alternative to turbopuffer, showing that a tiered storage architecture (**RAM → NVMe → object storage**) can be built entirely from open-source components. See [Storage backends](#storage-backends) for the full compatibility matrix.
+**Firn** is a multi-tenant vector and full-text search engine backed by object storage (AWS S3, MinIO, Cloudflare R2, Tigris, DigitalOcean Spaces, Google Cloud Storage). It is a credible open-source alternative to proprietary object-storage-backed search services, showing that a tiered storage architecture (**RAM, then NVMe, then object storage**) can be built entirely from open-source components. See [Storage backends](#storage-backends) for the full compatibility matrix.
 
 It pairs LanceDB (vector and BM25 search that runs directly on object storage) with foyer (a RAM + NVMe cache), so your data sits on cheap object storage while repeated queries are served from cache without a backend round-trip.
 
@@ -19,22 +19,22 @@ What decides whether Firn fits your workload:
 
 *   **An IVF_PQ index makes search on object storage practical.** With no index every query is a brute-force scan at ~25 s; with one, a cold query is ~979 ms. Build it (`POST /ns/{ns}/index`) after your first batch of writes.
 *   **The result cache accelerates queries that repeat, not queries that are new.** A warm hit is a byte-identical repeat against the same namespace version; it returns in microseconds and, once the handle is warm, makes zero backend requests. A novel query misses and pays the cold cost above. See [What the cache does and does not do](#what-the-cache-does-and-does-not-do).
-*   **Two optional layers widen what skips the backend.** The [semantic cache](#opt-in-semantic-cache) reuses a recent result when an incoming query vector is close enough — an approximate reuse, hence opt-in. The object cache keeps the object-storage bytes Lance reads on local NVMe, so even a genuinely new query over already-read data avoids repeating the S3 round-trips.
+*   **Two optional layers widen what skips the backend.** The [semantic cache](#opt-in-semantic-cache) reuses a recent result when an incoming query vector is close enough (an approximate reuse, so it is opt-in). The object cache keeps the object-storage bytes Lance reads on local NVMe, so even a genuinely new query over already-read data avoids repeating the S3 round-trips.
 
 ## What the cache does and does not do
 
-The **result cache** stores a complete serialised query result set, keyed on the namespace, its current Lance table version, and a hash of the full query. A hit needs an exact repeat of the same query against the same version. Any committed write advances the version and makes that namespace's cached results unreachable, so a running server never returns stale results after a write — and because the version is persisted, that holds across a restart. Forming the key reads the version, so the first query to a namespace in a process opens its table handle (one manifest read) even on a cache hit; later hits read it from memory.
+The **result cache** stores a complete serialised query result set, keyed on the namespace, its current Lance table version, and a hash of the full query. A hit needs an exact repeat of the same query against the same version. Any committed write advances the version and makes that namespace's cached results unreachable, so a running server never returns stale results after a write, and because the version is persisted that holds across a restart. Forming the key reads the version, so the first query to a namespace in a process opens its table handle (one manifest read) even on a cache hit; later hits read it from memory.
 
 A query Firn has not seen before misses the result cache and pays the full LanceDB-over-object-storage cost. That cost is already low once an IVF_PQ index exists, and LanceDB's own indexes, the per-namespace connection pool, and OS page caching reduce it further. Two **opt-in** layers go further still:
 
-*   **Semantic cache** — widens hits to *near-duplicate* queries, returning an approximate result that was not freshly searched. See [Opt-in semantic cache](#opt-in-semantic-cache).
-*   **Object cache** — keeps the immutable object-storage bytes Lance reads (data fragments and index files) on local NVMe, so a cold or genuinely novel query over data already pulled once is served from disk instead of repeating the small S3 GETs that dominate cold latency. It caches only write-once objects — manifests and any conditional or versioned read always pass through — so it needs no invalidation step: a write, delete, compaction, or index build is reflected immediately. Disk use is a byte budget with LRU eviction, held across restarts. Off by default; set `FIRNFLOW_OBJECT_CACHE_ENABLED=true` and point `FIRNFLOW_OBJECT_CACHE_DIR` at fast local disk. The `firnflow_object_cache_*` metrics show its effectiveness; see [configuration](https://firnflow.io/configuration.html#object-cache) for the byte budget and per-entry limits.
+*   **Semantic cache.** Widens hits to *near-duplicate* queries, returning an approximate result that was not freshly searched. See [Opt-in semantic cache](#opt-in-semantic-cache).
+*   **Object cache.** Keeps the immutable object-storage bytes Lance reads (data fragments and index files) on local NVMe, so a cold or genuinely novel query over data already pulled once is served from disk instead of repeating the small S3 GETs that dominate cold latency. It caches only write-once objects (manifests and any conditional or versioned read always pass through), so it needs no invalidation step: a write, delete, compaction, or index build is reflected immediately. Disk use is a byte budget with LRU eviction, held across restarts. Off by default; set `FIRNFLOW_OBJECT_CACHE_ENABLED=true` and point `FIRNFLOW_OBJECT_CACHE_DIR` at fast local disk. The `firnflow_object_cache_*` metrics show its effectiveness, and [configuration](https://firnflow.io/configuration.html#object-cache) documents the byte budget and per-entry limits.
 
-If your traffic is mostly unique queries the result-cache hit rate is low by design — the value is the cost and multi-tenant model of search on object storage, optionally with the object cache absorbing the repeated byte reads underneath.
+If your traffic is mostly unique queries the result-cache hit rate is low by design. The value there is the cost and multi-tenant model of search on object storage, optionally with the object cache absorbing the repeated byte reads underneath.
 
 ### Demo
 
-Cold query, warm query, full-text search, and cache proof in 60 seconds, against local MinIO with no index (so the cold query is a fast ~109 ms here; on real S3 it follows the ~25 s → ~979 ms → microsecond progression in the table above).
+Cold query, warm query, full-text search, and cache proof in 60 seconds, against local MinIO with no index, so the cold query is a fast ~109 ms here. On real S3 an unindexed cold query is closer to ~25 s, an IVF_PQ index brings that to ~979 ms, and repeated queries return from cache in microseconds.
 
 ![Firn demo](bench/demo.gif)
 
@@ -76,7 +76,7 @@ The v0.1 scope is embedded use only: the package does not connect to a running F
 2.  **L2: NVMe Cache** (via foyer): Fast, durable cache for high-volume search results.
 3.  **L3: Object Storage** (via LanceDB on AWS S3 / MinIO / R2 / Tigris / Spaces / native GCS): The "Source of Truth" where every namespace is isolated under its own object-storage prefix.
 
-An optional **object cache** sits between LanceDB and object storage, keeping the byte ranges Lance reads on local NVMe — distinct from the foyer result cache above, which stores whole query results. Off by default; see [What the cache does and does not do](#what-the-cache-does-and-does-not-do).
+An optional **object cache** sits between LanceDB and object storage, keeping the byte ranges Lance reads on local NVMe. This is distinct from the foyer result cache above, which stores whole query results. Off by default; see [What the cache does and does not do](#what-the-cache-does-and-does-not-do).
 
 ### Key Technologies
 *   **axum:** High-performance async REST API.
@@ -96,13 +96,13 @@ Firn's correctness depends on the underlying object store offering a strictly li
 | **Backblaze B2** (S3 compat layer) | ❌ | Returns `HTTP 501 NotImplemented` on the first PutObject with `If-None-Match: *`. B2's native API supports conditional writes via `X-Bz-*` headers, but the S3-compat gateway does not translate them. Loud failure: easy to detect, not usable for Firn. |
 | **Tigris** (dual-region + single-region) | ✅ | `If-None-Match: *` honoured on concurrent commits; 100-run stress clean on both dual-region and single-region buckets as of 2026-04-19 after an upstream CAS fix. Use path-style addressing on `t3.storage.dev`. |
 | **DigitalOcean Spaces** (`lon1` validated) | ✅ | Strict CAS, 100-run stress clean. Per-iteration latency ~3.10s, in the same band as AWS `eu-west-1` and the fastest non-AWS backend tested. Use the regional endpoint (`https://<region>.digitaloceanspaces.com`), not the virtual-hosted form, with path-style addressing. |
-| **Google Cloud Storage** (native, `europe-west1` validated) | ✅ | Routed through lancedb's native `gcs` feature and `object_store::gcp`, which use the GCS XML API's generation precondition (`x-goog-if-generation-match: 0`) instead of `If-None-Match: *`. 100-run Lance-level concurrent-writer stress passes cleanly against `firn-gcs-bucket-europe-west1`; an 8-writer barrier-gated contended-key microstress and a sequential pre-flight also pass — see `crates/firnflow-core/tests/lance_concurrent_writes.rs` and `s3_conditional_writes.rs`. Auth is service-account JSON via the standard `GOOGLE_*` environment variables. Use a `gs://...` URI; the GCS S3-interop endpoint (reached via an `s3://` URI plus a custom `GCS_ENDPOINT`) remains unsupported because that path silently drops `If-None-Match: *` and loses writers under contention. |
+| **Google Cloud Storage** (native, `europe-west1` validated) | ✅ | Routed through lancedb's native `gcs` feature and `object_store::gcp`, which use the GCS XML API's generation precondition (`x-goog-if-generation-match: 0`) instead of `If-None-Match: *`. 100-run Lance-level concurrent-writer stress passes cleanly against `firn-gcs-bucket-europe-west1`; an 8-writer barrier-gated contended-key microstress and a sequential pre-flight also pass (see `crates/firnflow-core/tests/lance_concurrent_writes.rs` and `s3_conditional_writes.rs`). Auth is service-account JSON via the standard `GOOGLE_*` environment variables. Use a `gs://...` URI; the GCS S3-interop endpoint (reached via an `s3://` URI plus a custom `GCS_ENDPOINT`) remains unsupported because that path silently drops `If-None-Match: *` and loses writers under contention. |
 
 The two dedicated tests live at `crates/firnflow-core/tests/s3_conditional_writes.rs` and `crates/firnflow-core/tests/lance_concurrent_writes.rs`. Both are `#[ignore]`'d and require credentials to run. If you want to evaluate a backend not in the table, copy a block from either file and point it at your own bucket.
 
 ## Backend Configuration
 
-Backend choice is an operator config decision, not a recompile. Set `FIRNFLOW_STORAGE_URI` to point Firn at the bucket you want — switching between any two validated backends is an env-var change. `FIRNFLOW_S3_BUCKET` remains supported as a legacy S3-only fallback; if both are set they must agree, or startup fails.
+Backend choice is an operator config decision, not a recompile. Set `FIRNFLOW_STORAGE_URI` to point Firn at the bucket you want. Switching between any two validated backends is an env-var change. `FIRNFLOW_S3_BUCKET` remains supported as a legacy S3-only fallback; if both are set they must agree, or startup fails.
 
 `FIRNFLOW_STORAGE_URI` accepts an `s3://` or `gs://` URI with an optional fixed prefix, e.g. `s3://shared-bucket/tenants/acme/prod` or `gs://shared-bucket/tenants/acme/prod`. The prefix is useful when several deployments share a single bucket; namespace tables live at `{root}/{namespace}/`.
 
@@ -163,14 +163,14 @@ GOOGLE_APPLICATION_CREDENTIALS=/etc/firnflow/gcp-sa.json
 # or GOOGLE_SERVICE_ACCOUNT_KEY=<inline service-account JSON>.
 ```
 
-Use `gs://...` rather than reaching for the GCS S3-interop endpoint — the interop path silently drops `If-None-Match: *` and is not supported.
+Use `gs://...` rather than reaching for the GCS S3-interop endpoint. The interop path silently drops `If-None-Match: *` and is not supported.
 
 ## Features
 
 *   **Multi-tenant by Design:** Each namespace maps to an isolated object-storage prefix under the configured `FIRNFLOW_STORAGE_URI` (e.g. `s3://bucket/namespace/` or `gs://bucket/namespace/`) with near-zero idle cost.
 *   **Instant Invalidation:** Cached results are keyed on the Lance table version, so a write advances the version and makes that namespace's stale results unreachable in $O(1)$ time, with no separate bookkeeping.
-*   **Optional Object Cache:** A byte-range cache on local NVMe beneath the storage engine. When enabled, the object-storage reads behind cold and novel queries are served from disk — not just exact-repeat queries. Off by default ([details](#what-the-cache-does-and-does-not-do)).
-*   **CAS Consistency:** Verified concurrency safety using the backend's conditional-write primitive — `If-None-Match: *` for S3-family backends, the generation precondition for native GCS — to prevent data loss when multiple writers fight for the same bucket.
+*   **Optional Object Cache:** A byte-range cache on local NVMe beneath the storage engine. When enabled, the object-storage reads behind cold and novel queries are served from disk, not just exact-repeat queries. Off by default ([details](#what-the-cache-does-and-does-not-do)).
+*   **CAS Consistency:** Verified concurrency safety using the backend's conditional-write primitive (`If-None-Match: *` for S3-family backends, the generation precondition for native GCS) to prevent data loss when multiple writers fight for the same bucket.
 *   **Late-Interaction Search:** Each namespace is either single-vector (one dense vector per row) or multivector (a bag of small vectors per row, scored via MaxSim). The multivector shape is what ColBERT, ColPali, and ColQwen2 produce, and is what compositional queries like *"a man with a logo on his shirt"* need to match each element independently. See [Multivector namespaces](#multivector-namespaces) below.
 *   **Compact Serialization:** Query results are serialized with `bincode`, with a path to `rkyv` if a workload needs zero-copy.
 *   **Operational Excellence:** Native Prometheus metrics tracking cache hit rates and backend request count (the primary signal for cost savings).
@@ -211,7 +211,7 @@ curl -X POST http://localhost:3000/ns/demo/query \
      -d '{"vector": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "k": 1}'
 ```
 
-Hits carry the stored vector by default. Add `"include_vector": false` to the request if you only need ids, scores, and text — at realistic dimensions the vectors are most of the response bytes, so skipping them shrinks the response and the cached result, and can cut the object-storage read for the returned rows' vectors. It is response projection, not a scan optimisation: Lance still reads whatever it needs to score the query.
+Hits carry the stored vector by default. Add `"include_vector": false` to the request if you only need ids, scores, and text. At realistic dimensions the vectors are most of the response bytes, so skipping them shrinks the response and the cached result, and can cut the object-storage read for the returned rows' vectors. It is response projection, not a scan optimisation: Lance still reads whatever it needs to score the query.
 
 ### 4. Check the Savings
 See how much object-storage traffic you've avoided:
@@ -234,7 +234,7 @@ Firn ships with optional bearer-token authentication on the REST API. Both keys 
 
 Header format on every protected request: `Authorization: Bearer <token>` (generate a key with e.g. `openssl rand -hex 32`).
 
-If `FIRNFLOW_ADMIN_API_KEY` is unset, the read/write key authorises admin routes too (single-key fallback). Set both keys to a different value to lock destructive operations behind a separate credential. If neither key is set the API stays open and logs a single startup `WARN` — this preserves the default-open posture of the local-dev compose stack.
+If `FIRNFLOW_ADMIN_API_KEY` is unset, the read/write key authorises admin routes too (single-key fallback). Set both keys to a different value to lock destructive operations behind a separate credential. If neither key is set the API stays open and logs a single startup `WARN`, preserving the default-open posture of the local-dev compose stack.
 
 **This is service-level authentication.** Any holder of `FIRNFLOW_API_KEY` can read or write any namespace; any holder of `FIRNFLOW_ADMIN_API_KEY` can additionally delete or rebuild indexes on any namespace. If you need per-tenant namespace isolation, place Firn behind an authenticating gateway that enforces tenant-to-namespace authorisation. See [`docs/configuration.html`](https://firnflow.io/configuration.html) for the rate-limiting knobs (`FIRNFLOW_RATE_LIMIT_RPS`, `FIRNFLOW_RATE_LIMIT_BURST`, `FIRNFLOW_PREAUTH_IP_LIMIT_RPS`) and the `FIRNFLOW_TRUST_PROXY_HEADERS` switch for deployments behind a load balancer.
 
@@ -264,7 +264,7 @@ Auth column: `open` = no header required; `read/write` = `FIRNFLOW_API_KEY` (or 
 
 Each namespace is one of two **vector kinds**, fixed by the shape of the first upsert and immutable thereafter:
 
-- **Single-vector** (the default). One dense vector per row. Used for CLIP, OpenAI `text-embedding-3-*`, sentence-transformers — anything that pools a piece of content into a single embedding.
+- **Single-vector** (the default). One dense vector per row. Used for CLIP, OpenAI `text-embedding-3-*`, sentence-transformers (anything that pools a piece of content into a single embedding).
 - **Multivector**. A variable-length bag of small vectors per row, scored with MaxSim (for each query sub-vector, find its best match anywhere in the document, then sum the matches). This is what ColBERT, ColPali, and ColQwen2 produce, and what compositional queries like *"a man with a logo on his shirt"* need: each query element finds its own best match independently, instead of the whole query collapsing into one summary vector that smears the concepts together.
 
 The wire shape determines the kind. A single-vector upsert uses `vector: [f32, ...]`; a multivector upsert uses `vectors: [[f32, ...], [f32, ...], ...]`. Queries follow the same convention:
@@ -287,21 +287,21 @@ curl -X POST http://localhost:3000/ns/photos-mv/query \
      -d '{"vectors": [[0.1, 0.2, 0.3, 0.4]], "k": 5}'
 ```
 
-The handler returns 400 if the payload shape does not match the namespace's kind — for example a `vector:` payload sent to a multivector namespace, or vice versa. The error response names the expected shape.
+The handler returns 400 if the payload shape does not match the namespace's kind, for example a `vector:` payload sent to a multivector namespace, or vice versa. The error response names the expected shape.
 
 **Constraints to know before adopting multivector:**
 
 - **Cosine only.** Lance's late-interaction index supports cosine distance exclusively. Firn does not expose a per-request metric option on the API surface; `create_index` constructs the IVF_PQ builder with cosine internally for multivector namespaces and with L2 for single-vector namespaces.
 - **Storage is materially larger.** A single-vector CLIP entry is ~2 KB per row. A multivector ColPali entry is closer to ~500 KB per row (around 1030 sub-vectors × 128 floats). Budget S3 footprint and index-build wall-clock time accordingly.
-- **Build an index for tractable latency.** Lance answers multivector queries on an un-indexed namespace via brute-force scan — fine for tiny development corpora, painfully slow on anything real. Build the IVF_PQ index (`POST /ns/{ns}/index`) after the first batch of upserts. Same trade-off as single-vector queries.
+- **Build an index for tractable latency.** Lance answers multivector queries on an un-indexed namespace via brute-force scan, fine for tiny development corpora but painfully slow on anything real. Build the IVF_PQ index (`POST /ns/{ns}/index`) after the first batch of upserts. Same trade-off as single-vector queries.
 - **The result cache does not accelerate novel multivector queries.** Every tokenised query is unique, so result-cache hit rate is near zero here; it still accelerates exact repeats (useful for benchmarks, not production retrieval). The object cache, if enabled, still helps by serving the underlying byte reads from NVMe.
 - **New-namespace only.** A namespace that started as single-vector cannot be converted to multivector in place. Create a new namespace with a multivector first upsert.
 
-**Encoders that produce vectors in the right shape:** ColBERTv2 (text passages), ColPali (documents, slides, PDFs), ColQwen2 / ColIDEFICS (multimodal — natural images and documents). Firn stays model-agnostic: the caller computes the bag of small vectors and POSTs it.
+**Encoders that produce vectors in the right shape:** ColBERTv2 (text passages), ColPali (documents, slides, PDFs), ColQwen2 / ColIDEFICS (multimodal: natural images and documents). Firn stays model-agnostic: the caller computes the bag of small vectors and POSTs it.
 
 ## Opt-in semantic cache
 
-The exact result cache only helps when the same JSON request repeats verbatim. When users phrase the same intent differently — "holiday photos" vs "photos of my holidays", so the query vectors are very close but not byte-identical — the opt-in `semantic_cache` block on `POST /ns/{ns}/query` sits behind the exact cache and lets a near-duplicate query reuse a previous result.
+The exact result cache only helps when the same JSON request repeats verbatim. When users phrase the same intent differently ("holiday photos" vs "photos of my holidays", so the query vectors are very close but not byte-identical), the opt-in `semantic_cache` block on `POST /ns/{ns}/query` sits behind the exact cache and lets a near-duplicate query reuse a previous result.
 
 ```bash
 curl -X POST http://localhost:3000/ns/photos/query \
@@ -319,17 +319,17 @@ curl -X POST http://localhost:3000/ns/photos/query \
 The read path is:
 
 1. Compute the exact-cache key (which does **not** include the `semantic_cache` block, so toggling the option does not split otherwise-identical entries).
-2. On an exact hit, return the cached bytes — semantic layer is not consulted.
+2. On an exact hit, return the cached bytes; the semantic layer is not consulted.
 3. On an exact miss, scan the per-namespace semantic sidecar for a cached query whose vector cosine-similarity is at least `min_similarity` and whose `k` / `nprobes` / `include_vector` match. If something clears the bar, return its bytes.
 4. Otherwise run the backend query, populate both layers, and return the fresh result.
 
 **v1 boundaries** (returns 400 otherwise):
 
-- single-vector queries only — `vectors`, `text`, and hybrid shapes are rejected when `semantic_cache.enabled` is true;
+- single-vector queries only: `vectors`, `text`, and hybrid shapes are rejected when `semantic_cache.enabled` is true;
 - `min_similarity` must be in `(0.0, 1.0]`. Omitting picks a deliberately strict default of `0.995`;
 - the sidecar is in-memory, single-process, and bounded to 1024 entries per namespace generation. Any committed change drops both layers for the namespace: writes, deletes, and compactions, and also index builds, since an index build is itself a Lance commit that advances the table version the cache keys on.
 
-**Why opt-in.** A semantic hit is an *approximate* result reuse, not proof that Firn searched the corpus for the new query — high vector similarity does not guarantee an identical top-k under strict ranking. Three counters (`firnflow_semantic_cache_hits_total`, `_misses_total`, `_rejections_total{reason=…}`) make the behaviour visible so operators can judge whether the latency win is worth the approximation.
+**Why opt-in.** A semantic hit is an *approximate* result reuse, not proof that Firn searched the corpus for the new query. High vector similarity does not guarantee an identical top-k under strict ranking. Three counters (`firnflow_semantic_cache_hits_total`, `_misses_total`, `_rejections_total{reason=…}`) make the behaviour visible so operators can judge whether the latency win is worth the approximation.
 
 ## Development and Benchmarking
 
