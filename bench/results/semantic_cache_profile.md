@@ -3,7 +3,7 @@
 - **Start UTC**: 2026-05-31T12:35:36Z
 - **Stop UTC**: 2026-05-31T12:35:41Z
 - **Harness**: `./scripts/cargo run --release -p firnflow-bench --bin semantic_cache_profile -j 1`
-- **Backend**: `s3://firnflow`
+- **Backend**: MinIO
 - **Namespace**: `bench-semantic-1780230936697832392`
 - **Config**: dim=512, rows=10000, reps=200, k=10, nprobes=20, threshold=0.995000
 - **Storage**: ~19.5 MB raw vector data

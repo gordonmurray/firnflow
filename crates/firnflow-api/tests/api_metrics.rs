@@ -92,7 +92,7 @@ async fn metrics_reflect_cache_hits_misses_and_s3_asymmetry() {
     let (app, _tmp) = build_app().await;
     let ns = unique_namespace("metrics-test");
 
-    // 1. Upsert (records s3_requests{op=upsert} and write_duration)
+    // 1. Upsert (records s3_requests{operation=upsert} and write_duration)
     let upsert_body = json!({
         "rows": [
             {"id": 1, "vector": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
@@ -102,7 +102,7 @@ async fn metrics_reflect_cache_hits_misses_and_s3_asymmetry() {
     let (status, _) = post_json(app.clone(), format!("/ns/{ns}/upsert"), upsert_body).await;
     assert_eq!(status, StatusCode::OK);
 
-    // 2. First query (records cache_miss and s3_requests{op=query})
+    // 2. First query (records cache_miss and s3_requests{operation=query})
     let query_body = json!({
         "vector": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "k": 3

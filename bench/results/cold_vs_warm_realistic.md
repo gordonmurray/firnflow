@@ -2,7 +2,7 @@
 
 - **Date**: 2026-04-12
 - **Harness**: `./scripts/cargo run --release -p firnflow-bench`
-- **Backend**: MinIO (see `docs/provider-support.md` for the pinned digest)
+- **Backend**: MinIO
 - **Config**: dim=1536, rows=100000, queries=50, nprobes=20
 - **Storage**: ~586 MB raw vector data
 - **Cache**: RAM=16MB, NVMe=1024MB

@@ -1,8 +1,8 @@
-# Cold vs warm query latency — realistic parameters
+# Cold vs warm query latency — AWS S3, realistic parameters
 
 - **Date**: 2026-04-12
 - **Harness**: `./scripts/cargo run --release -p firnflow-bench`
-- **Backend**: MinIO (see `docs/provider-support.md` for the pinned digest)
+- **Backend**: AWS S3 (eu-west-1)
 - **Config**: dim=1536, rows=100000, queries=50, nprobes=20
 - **Storage**: ~586 MB raw vector data
 - **Cache**: RAM=16MB, NVMe=1024MB

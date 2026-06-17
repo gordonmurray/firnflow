@@ -2,7 +2,7 @@
 
 - **Date**: 2026-04-11
 - **Harness**: `./scripts/cargo run --release -p firnflow-bench`
-- **Backend**: MinIO (see `docs/provider-support.md` for the pinned digest)
+- **Backend**: MinIO
 - **Config**: dim=32, rows=100, queries=50
 - **Upsert phase**: completed in 33 ms
 
@@ -21,10 +21,10 @@
 | -------------------------------------------------- | ----: |
 | `firnflow_cache_misses_total`                    | 50 |
 | `firnflow_cache_hits_total`                      | 50 |
-| `firnflow_s3_requests_total{op=upsert}`        | 1 |
-| `firnflow_s3_requests_total{op=query}`         | 50 |
+| `firnflow_s3_requests_total{operation=upsert}` | 1 |
+| `firnflow_s3_requests_total{operation=query}`  | 50 |
 
-The load-bearing observation: **50 query-kind S3 requests for 50 cold queries, then **0 additional** for 50 warm queries**. Every warm query was served from foyer without touching the backend, which is the whole reason the cache exists.
+The load-bearing observation: **50 query-kind S3 requests for 50 cold queries, then 0 additional for 50 warm queries.** Every warm query was served from foyer without touching the backend, which is the whole reason the cache exists.
 
 ## Notes
 

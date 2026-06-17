@@ -87,7 +87,6 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
 source "$HOME/.cargo/env"
 git clone https://github.com/gordonmurray/firnflow.git
 cd firnflow
-git checkout feat/first-query-profile-bench
 cargo build --release -p firnflow-bench --bin first_query_profile
 ```
 

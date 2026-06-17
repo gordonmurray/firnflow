@@ -58,9 +58,31 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use firnflow_core::cache::NamespaceCache;
 use firnflow_core::{
-    CoreMetrics, NamespaceId, NamespaceManager, NamespaceService, QueryRequest, StorageRoot,
-    UpsertRow,
+    CoreMetrics, NamespaceId, NamespaceManager, NamespaceService, QueryRequest, Scheme,
+    StorageRoot, UpsertRow,
 };
+
+/// Label the backend by scheme and region without echoing the bucket
+/// name, so a committed report never carries it. An endpoint override
+/// (MinIO, R2, Tigris) is reported as an S3-compatible endpoint.
+fn derive_backend_label(root: &StorageRoot, opts: &HashMap<String, String>) -> String {
+    let scheme = match root.scheme() {
+        Scheme::S3 => "S3",
+        Scheme::Gcs => "GCS",
+        Scheme::Local => "local filesystem",
+    };
+    let region = opts.get("aws_region").map(String::as_str).unwrap_or("");
+    let suffix = if region.is_empty() {
+        String::new()
+    } else {
+        format!(" ({region})")
+    };
+    if opts.contains_key("aws_endpoint") {
+        format!("{scheme}-compatible endpoint{suffix}")
+    } else {
+        format!("{scheme}{suffix}")
+    }
+}
 
 struct BenchConfig {
     storage_root: StorageRoot,
@@ -433,13 +455,14 @@ async fn main() -> anyhow::Result<()> {
     // ================================================================
     let date = chrono_today();
     let storage_mb = (cfg.rows as f64 * cfg.dim as f64 * 4.0) / (1024.0 * 1024.0);
+    let backend = derive_backend_label(&cfg.storage_root, &cfg.storage_options);
 
     let out = format!(
         "# Cold vs warm query latency — realistic parameters\n\
 \n\
 - **Date**: {date}\n\
 - **Harness**: `./scripts/cargo run --release -p firnflow-bench`\n\
-- **Backend**: MinIO (see `docs/provider-support.md` for the pinned digest)\n\
+- **Backend**: {backend}\n\
 - **Config**: dim={dim}, rows={rows}, queries={queries}, nprobes={nprobes}\n\
 - **Storage**: ~{storage_mb:.0} MB raw vector data\n\
 - **Cache**: RAM={cache_ram}MB, NVMe={cache_nvme}MB\n\
