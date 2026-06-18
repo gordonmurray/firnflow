@@ -110,7 +110,7 @@ impl BenchConfig {
         }
         opts.insert(
             "aws_region".into(),
-            env_or("FIRNFLOW_S3_REGION", "us-east-1"),
+            firnflow_core::resolve_s3_region(|k| std::env::var(k).ok()),
         );
 
         Ok(Self {

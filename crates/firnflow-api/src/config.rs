@@ -352,9 +352,16 @@ fn build_s3_storage_options() -> HashMap<String, String> {
     if let Ok(v) = std::env::var("FIRNFLOW_S3_SECRET_KEY") {
         opts.insert("aws_secret_access_key".into(), v);
     }
+    // Region resolution honours FIRNFLOW_S3_REGION, then the standard
+    // AWS_REGION / AWS_DEFAULT_REGION variables, then a us-east-1
+    // fallback. Setting it unconditionally here is deliberate: the
+    // value is fed to lancedb's connection builder and to the
+    // delete-path object_store builder, and an explicit region must
+    // win over the bare AmazonS3Builder::from_env() default in the
+    // latter. See firnflow_core::resolve_s3_region for the precedence.
     opts.insert(
         "aws_region".into(),
-        env_or("FIRNFLOW_S3_REGION", "us-east-1"),
+        firnflow_core::resolve_s3_region(|k| std::env::var(k).ok()),
     );
     opts
 }
