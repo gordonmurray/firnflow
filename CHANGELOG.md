@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `POST /ns/{namespace}/scalar-index` takes an optional JSON body to choose which column to index. `{"column": "id"}` builds a BTree on the row id, and a request with no body keeps the previous default of `_ingested_at`. The `id` index is the maintenance path for namespaces created before auto-indexing existed (see Changed), so an operator can add it to an existing namespace without recreating it. An unsupported column is rejected with `400` before any background work starts. Closes #66.
+
+### Changed
+- `/upsert` builds a BTree index on `id` automatically on a namespace's first write. `/upsert` finds matches by `id` through LanceDB merge-insert; without an index on `id`, every batch scans each data fragment to decide which incoming ids are updates and which are inserts, so write latency climbed as a namespace grew. This was most visible on a large S3-backed first load, where per-batch commit and fragment work compounds the scan cost. Building the index once on the first write, while the table is still small, lets the merge-insert match lookup use the index instead of a full scan. The build is best-effort: the rows are committed first, so if the index build fails the upsert still succeeds and the index can be rebuilt later through `/scalar-index`. This does not by itself flatten throughput on a long append-heavy load, because rows written after the build land in unindexed fragments until a `/compact` folds them in; the recommended large-ingest path (load, compact, build indexes, query) is documented in the README. Refs #77.
+
 ### Fixed
 - S3 region resolution now honours the standard `AWS_REGION` and `AWS_DEFAULT_REGION` environment variables. Previously the region was read only from `FIRNFLOW_S3_REGION` and defaulted to `us-east-1` when that was unset, silently ignoring the `AWS_*` variables a host already exports — so a deployment in, say, `eu-west-1` that set `AWS_REGION` the conventional way still talked to `us-east-1` and failed against any backend that enforces region. Resolution order is now `FIRNFLOW_S3_REGION`, then `AWS_REGION`, then `AWS_DEFAULT_REGION`, then the `us-east-1` fallback (matching the AWS SDK's own `AWS_REGION`-over-`AWS_DEFAULT_REGION` precedence). Set `FIRNFLOW_S3_REGION` to pin the region explicitly; otherwise the ambient AWS region is picked up automatically. The same fix applies to the benchmark harnesses, which shared the old default.
 

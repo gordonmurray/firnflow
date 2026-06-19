@@ -113,6 +113,7 @@
       <div class="endpoint-body">
         <p>Inserts or updates rows in the namespace's Lance table, keyed by <code>id</code>. The vector dimension and the vector kind (single-vector or multivector) are inferred from the first upsert and enforced on subsequent calls. After a successful write, all cached query results for this namespace are invalidated.</p>
         <p>Upsert is latest-write-wins: re-sending a row whose <code>id</code> already exists replaces the stored row in full (vector, text, and the <code>_ingested_at</code> timestamp), so replaying a request and updating a document are both safe. A row with a new <code>id</code> is inserted. Because <code>_ingested_at</code> is rewritten on update, it reflects the most recent write to a row rather than its first insert. Duplicate ids within a single request are rejected with <code>400</code>.</p>
+        <p>The first write to a namespace builds a BTree index on <code>id</code> automatically, so the per-batch merge that matches incoming ids against stored rows uses the index instead of scanning every data file. For a large first load, see the recommended load/compact/index recipe in the README; for namespaces created before this behaviour existed, build the index once via <code>POST /ns/{namespace}/scalar-index</code> with <code>{"column": "id"}</code>.</p>
         <div class="callout callout-warning">
           <div class="callout-title">Upgrade note</div>
           Idempotent upsert does not retroactively de-duplicate older data. A namespace that accumulated duplicate ids under earlier (append-only) versions keeps those rows, and merging into a target that already holds duplicate ids is undefined, so <code>/query</code> and <code>/list</code> can still surface them until those ids are cleared (delete and re-ingest, or wait on the dedupe pass tracked in issue #68). Namespaces written only by this release forward are unaffected.
@@ -539,13 +540,13 @@
       <div class="endpoint-header" aria-expanded="true">
         <span class="method method-post">POST</span>
         <span class="endpoint-path">/ns/{namespace}/scalar-index</span>
-        <span class="endpoint-desc">Build BTree index on <code>_ingested_at</code> to accelerate <code>/list</code> (async)</span>
+        <span class="endpoint-desc">Build a BTree index on a column (async)</span>
       </div>
       <div class="endpoint-body">
-        <p>Builds a BTree scalar index on the reserved <code>_ingested_at</code> column. With the index in place, <code>/list</code> cursor pages do an index range scan instead of a full-fragment scan, and the leading <code>ORDER BY _ingested_at</code> short-circuits the in-memory sort step. Returns <code>202 Accepted</code>.</p>
+        <p>Builds a BTree scalar index on a namespace column. On <code>_ingested_at</code> (the default) the index lets <code>/list</code> cursor pages do an index range scan instead of a full-fragment scan, and the leading <code>ORDER BY _ingested_at</code> short-circuits the in-memory sort step. On <code>id</code> it speeds up the per-batch merge-insert lookup the write path runs (see <code>/upsert</code>). Returns <code>202 Accepted</code>.</p>
 
         <h4>Request body</h4>
-        <p>No request body required. v1 hardcodes the column to <code>_ingested_at</code> — the same constraint <code>/list</code> puts on <code>order_by</code>.</p>
+        <p>Optional. <code>{"column": "id"}</code> indexes the row id; an empty body defaults to <code>_ingested_at</code>. Valid columns are <code>id</code> and <code>_ingested_at</code>; any other value returns <code>400</code> before the background build starts. A namespace's first write already builds the <code>id</code> index automatically, so this is the maintenance path for namespaces created before that behaviour existed.</p>
 
         <h4>Response (202)</h4>
         <pre><code>{
@@ -556,7 +557,12 @@
 }</code></pre>
 
         <h4>Example</h4>
-        <pre><code>curl -X POST http://localhost:3000/ns/demo/scalar-index</code></pre>
+        <pre><code>curl -X POST http://localhost:3000/ns/demo/scalar-index
+
+# index the row id (write-path maintenance path)
+curl -X POST http://localhost:3000/ns/demo/scalar-index \
+     -H 'Content-Type: application/json' \
+     -d '{"column": "id"}'</code></pre>
 
         <div class="callout callout-info">
           <div class="callout-title">Idempotent and self-maintaining</div>

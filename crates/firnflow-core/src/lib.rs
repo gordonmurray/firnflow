@@ -20,8 +20,8 @@ pub mod vector;
 
 pub use error::FirnflowError;
 pub use manager::{
-    decode_list_cursor, encode_list_cursor, CompactResult, NamespaceManager, UpsertRow,
-    LIST_MAX_LIMIT,
+    decode_list_cursor, encode_list_cursor, validate_scalar_index_column, CompactResult,
+    NamespaceManager, UpsertRow, LIST_MAX_LIMIT,
 };
 pub use metrics::CoreMetrics;
 pub use namespace::NamespaceId;

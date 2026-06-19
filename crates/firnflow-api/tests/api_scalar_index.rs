@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 mod common;
-use common::{test_state, unique_namespace};
+use common::{test_state, test_state_offline, unique_namespace};
 
 async fn build_app_with_metrics() -> (axum::Router, tempfile::TempDir, Arc<CoreMetrics>) {
     let (state, tmp) = test_state().await;
@@ -262,6 +262,63 @@ async fn scalar_index_build_returns_202_and_list_still_works() {
     //    same order — the index swap must not corrupt the read path.
     let after_rebuild = list_all_ids(&app, &ns_indexed, 5).await;
     assert_eq!(after_rebuild, expected);
+}
+
+/// The `column` parameter is validated synchronously, so an
+/// unsupported column returns `400` before any storage is touched —
+/// no MinIO required. Uses the offline state whose backend refuses
+/// connections, which the request never reaches.
+#[tokio::test]
+async fn scalar_index_rejects_unsupported_column() {
+    let (state, _tmp) = test_state_offline().await;
+    let app = router(state);
+    let ns = unique_namespace("scalar-col-bad");
+
+    let (status, _) = post_json(
+        app,
+        format!("/ns/{ns}/scalar-index"),
+        json!({ "column": "vector" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unsupported scalar-index column must be rejected with 400"
+    );
+}
+
+/// A supported column (`id`) and the no-body default both return
+/// `202` synchronously — the build itself runs in the background, so
+/// the immediate response does not depend on a reachable backend.
+#[tokio::test]
+async fn scalar_index_accepts_id_and_default_columns() {
+    let (state, _tmp) = test_state_offline().await;
+    let app = router(state);
+    let ns = unique_namespace("scalar-col-ok");
+
+    // Explicit `id` column (the merge-insert maintenance path).
+    let (status, body) = post_json(
+        app.clone(),
+        format!("/ns/{ns}/scalar-index"),
+        json!({ "column": "id" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "id column must be accepted");
+    assert!(
+        body["operation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("op_")),
+        "202 should carry an operation id: {body}"
+    );
+
+    // No body: the column defaults to `_ingested_at`, preserving the
+    // original behaviour.
+    let (status, _) = post_empty(app, format!("/ns/{ns}/scalar-index")).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "an empty body must default to _ingested_at and return 202"
+    );
 }
 
 #[tokio::test]

@@ -202,7 +202,7 @@ curl -X POST http://localhost:3000/ns/demo/upsert \
      }'
 ```
 
-Upsert is keyed by `id` and is latest-write-wins: re-sending a row whose `id` already exists replaces the stored row in full rather than adding a second copy, so retries and genuine updates are both safe. Ids must be unique within a single request. The `_ingested_at` timestamp tracks the most recent write to a row, not its first insert.
+Upsert is keyed by `id` and is latest-write-wins: re-sending a row whose `id` already exists replaces the stored row in full rather than adding a second copy, so retries and genuine updates are both safe. Ids must be unique within a single request. The `_ingested_at` timestamp tracks the most recent write to a row, not its first insert. The first write to a namespace builds a BTree index on `id` so later batches find their matches through the index instead of scanning every data file. See [Loading data at scale](#loading-data-at-scale) for first-load guidance.
 
 ### 3. Perform a Search
 Query the same namespace for the nearest neighbor:
@@ -254,13 +254,33 @@ If `FIRNFLOW_ADMIN_API_KEY` is unset, the read/write key authorises admin routes
 | `/ns/{ns}/warmup` | `POST` | read/write | Non-blocking cache pre-warm hint |
 | `/ns/{ns}/index` | `POST` | admin | Build IVF_PQ vector index (async, returns 202) |
 | `/ns/{ns}/fts-index` | `POST` | admin | Build BM25 full-text search index (async, returns 202) |
-| `/ns/{ns}/scalar-index` | `POST` | admin | Build BTree index on `_ingested_at` to accelerate `/list` (async, returns 202) |
+| `/ns/{ns}/scalar-index` | `POST` | admin | Build a BTree index on a column (async, returns 202). Optional body `{"column": "id"}` for write-path merge-insert lookups; defaults to `_ingested_at` to accelerate `/list` |
 | `/ns/{ns}/compact` | `POST` | admin | Compact and prune data files (async, returns 202) |
 | `/operations/{id}` | `GET` | read/write | Status of a background operation by the `operation_id` from its 202; 404 if unknown or evicted |
 
 The async endpoints (`warmup`, `index`, `fts-index`, `scalar-index`, `compact`) return an opaque `operation_id` in their `202`; poll `GET /operations/{id}` to see whether the work is `running`, `succeeded`, or `failed` instead of inferring it from metrics.
 
 Auth column: `open` = no header required; `read/write` = `FIRNFLOW_API_KEY` (or `FIRNFLOW_ADMIN_API_KEY`); `admin` = `FIRNFLOW_ADMIN_API_KEY` if configured, otherwise `FIRNFLOW_API_KEY` via the single-key fallback. `/metrics` is `metrics` when `FIRNFLOW_METRICS_TOKEN` is set, otherwise `open`.
+
+## Loading data at scale
+
+Two ingest shapes have different cost profiles, and it helps to treat them differently.
+
+**Idempotent updates** (retries, re-ingesting changed documents) are what `/upsert` is built for. It is keyed by `id` and latest-write-wins, so re-sending a row is safe. The first write to a namespace builds a BTree on `id`, which is what the per-batch merge-insert uses to find existing rows instead of scanning every data file.
+
+**A large first load** (millions of rows into a fresh namespace over S3) needs a bit more care. Every `/upsert` is a separate commit, so a long run of small batches produces many small data files, and the per-commit and per-file bookkeeping adds up. Two things keep throughput steady:
+
+- **Use larger batches.** Fewer, bigger commits beat many tiny ones. The body limit is `FIRNFLOW_MAX_BODY_BYTES` (default 16 MB), so size batches up toward that rather than sending rows a handful at a time.
+- **Build indexes after the bulk load, not during it.** Index builds are most efficient over settled data.
+
+A recommended recipe for a first load:
+
+1. **Load** the data in large `/upsert` batches.
+2. **Compact** once the load is done: `POST /ns/{ns}/compact`. This merges the many small data files into fewer large ones and folds freshly written rows into the existing `id` index.
+3. **Build the query indexes**: `POST /ns/{ns}/index` (vector), `POST /ns/{ns}/fts-index` (full-text), and `POST /ns/{ns}/scalar-index` with `{"column": "_ingested_at"}` if you page with `/list`. These are async; poll `GET /operations/{id}`.
+4. **Query.**
+
+For a namespace created before auto-indexing existed, build the `id` index once with `POST /ns/{ns}/scalar-index -d '{"column": "id"}'` to get the same write-path benefit.
 
 ## Multivector namespaces
 
