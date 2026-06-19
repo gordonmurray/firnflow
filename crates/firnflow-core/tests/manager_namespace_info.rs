@@ -99,7 +99,12 @@ async fn info_reports_namespace_state_and_index_flags() {
     assert!(info.fragment_count >= 1, "at least one data fragment");
     assert!(!info.has_vector_index);
     assert!(!info.has_fts_index);
-    assert!(!info.has_scalar_index);
+    // The first upsert auto-builds a BTree on `id`, so the scalar-index
+    // flag is set even before any explicit index build.
+    assert!(
+        info.has_scalar_index,
+        "first upsert auto-builds the id index"
+    );
     assert!(info.table_version >= 1, "version advances on commits");
 
     // Both builds are synchronous at the manager layer.

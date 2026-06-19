@@ -77,12 +77,39 @@ const INGESTED_AT_COLUMN: &str = "_ingested_at";
 /// lacks scalar-index pushdown.
 pub const LIST_MAX_LIMIT: usize = 500;
 
-/// Columns the v1 `/scalar-index` endpoint will build a BTree on.
-/// Locked to `_ingested_at` to mirror the same constraint the
-/// `/list` endpoint puts on `order_by` — the BTree only earns its
-/// keep on columns the query path actually filters or orders by.
-/// Future user-column ordering work extends this slice.
-const SCALAR_INDEX_COLUMNS: &[&str] = &[INGESTED_AT_COLUMN];
+/// Columns the `/scalar-index` endpoint will build a BTree on.
+///
+/// - `id` accelerates merge-insert match-finding on the write path:
+///   without it, every `/upsert` batch scans each fragment to decide
+///   which incoming ids are updates and which are inserts, so write
+///   latency grows with table size. New namespaces get this index
+///   automatically on first write; the endpoint is the maintenance
+///   path for namespaces created before auto-indexing existed.
+/// - `_ingested_at` lets `/list` cursor pages do an index range scan
+///   instead of a full-fragment scan, mirroring the constraint the
+///   `/list` endpoint puts on `order_by`.
+///
+/// The BTree only earns its keep on columns the read or write path
+/// actually uses; future user-column ordering work extends this slice.
+const SCALAR_INDEX_COLUMNS: &[&str] = &["id", INGESTED_AT_COLUMN];
+
+/// Validate that `column` is one the scalar-index path will build a
+/// BTree on, returning [`FirnflowError::InvalidRequest`] otherwise.
+///
+/// Exposed so the API layer can reject an unsupported column with a
+/// synchronous `400` before it spawns the background build task —
+/// the same reasoning as [`crate::validate_ivf_pq_options`], which
+/// avoids a misleading `202` followed by a log-only failure.
+pub fn validate_scalar_index_column(column: &str) -> Result<(), FirnflowError> {
+    if SCALAR_INDEX_COLUMNS.contains(&column) {
+        Ok(())
+    } else {
+        Err(FirnflowError::InvalidRequest(format!(
+            "scalar index column {column:?} is not supported; \
+             valid columns: {SCALAR_INDEX_COLUMNS:?}"
+        )))
+    }
+}
 
 /// Per-namespace schema facts cached after the first table open.
 /// The resolved vector dimension, the kind of vector representation
@@ -535,9 +562,14 @@ impl NamespaceManager {
     /// inserted. Replaying the same request is therefore idempotent
     /// from the caller's point of view, and `_ingested_at` reflects
     /// the most recent write rather than the first insert. The merge
-    /// finds matches by scanning for `id`; there is no scalar index on
-    /// `id` yet, so writes to a large namespace pay a full-fragment
-    /// scan per batch (see issue #66 for the planned auto-built BTree).
+    /// finds matches on `id`; a BTree index on `id` lets that lookup
+    /// use the index instead of scanning every fragment, so on the
+    /// first write to a fresh namespace this builds that index once
+    /// (the table is still small). Namespaces created before this
+    /// behaviour existed can build it through `create_scalar_index`
+    /// with the `id` column. The build is best-effort: the write has
+    /// already committed by the time it runs, so a failure is logged
+    /// and the upsert still succeeds.
     ///
     /// Lance leaves merge behaviour undefined when several source rows
     /// match the same target row, so duplicate ids within a single
@@ -569,16 +601,22 @@ impl NamespaceManager {
         // Determine schema facts: cached → live schema → infer for
         // a fresh namespace. Fresh namespaces always get the current
         // schema (with `_ingested_at`); pre-upgrade tables keep their
-        // legacy shape so writes continue to match.
-        let info = match self.resolve_schema_info(ns).await? {
-            Some(info) => info,
+        // legacy shape so writes continue to match. A `None` here
+        // means the table does not exist yet, so this call creates it
+        // — the one moment we build the `id` index, while it is empty
+        // or near-empty.
+        let (info, is_fresh) = match self.resolve_schema_info(ns).await? {
+            Some(info) => (info, false),
             None => {
                 let (kind, dim) = inspect_row_payload(&rows[0])?;
-                NamespaceSchemaInfo {
-                    dim,
-                    kind,
-                    has_ingested_at: true,
-                }
+                (
+                    NamespaceSchemaInfo {
+                        dim,
+                        kind,
+                        has_ingested_at: true,
+                    },
+                    true,
+                )
             }
         };
 
@@ -609,6 +647,58 @@ impl NamespaceManager {
             .map_err(|e| FirnflowError::Backend(format!("table.merge_insert: {e}")))?;
 
         self.schema_info.insert(ns.clone(), info);
+
+        // On the namespace's first write, build a BTree on `id` so
+        // every subsequent merge-insert finds its matches through the
+        // index rather than scanning each fragment — the write-path
+        // cost that otherwise grows with table size. Best-effort: the
+        // rows above are already durable, so an index-build failure is
+        // logged and the upsert still returns success (the index can
+        // be rebuilt later through `create_scalar_index`).
+        if is_fresh {
+            match self.build_id_index(&tbl).await {
+                Ok(()) => {
+                    // The index build is a Lance commit, so the handle
+                    // pooled while creating the table now references the
+                    // pre-index view. Drop it and open a fresh one in its
+                    // place: later merge-insert batches then see and use
+                    // the index, and the pool stays warm — an upsert must
+                    // not leave it cold (the explicit index builders evict
+                    // and let the next call re-open lazily; here the next
+                    // call is the warm upsert, so re-pool eagerly).
+                    self.evict_handle(ns);
+                    if let Err(e) = self.get_or_open_table(ns, info.kind, info.dim).await {
+                        tracing::warn!(
+                            namespace = %ns,
+                            error = %e,
+                            "could not re-pool handle after id index build; \
+                             it will reopen on the next operation"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        namespace = %ns,
+                        error = %e,
+                        "auto-build of id index failed on first write; \
+                         rebuild it with POST /ns/{ns}/scalar-index column=id"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Build a BTree scalar index on the `id` column of an already
+    /// open table. Used by [`upsert`](Self::upsert) on a namespace's
+    /// first write and by [`create_scalar_index`](Self::create_scalar_index)
+    /// for the `id` maintenance path. Idempotent: `lancedb`'s
+    /// `IndexBuilder` defaults to `replace=true`.
+    async fn build_id_index(&self, tbl: &lancedb::Table) -> Result<(), FirnflowError> {
+        tbl.create_index(&["id"], Index::BTree(BTreeIndexBuilder::default()))
+            .execute()
+            .await
+            .map_err(|e| FirnflowError::Backend(format!("build id index: {e}")))?;
         Ok(())
     }
 
@@ -1055,18 +1145,23 @@ impl NamespaceManager {
 
     /// Build a BTree scalar index on a namespace column.
     ///
-    /// v1 only accepts `_ingested_at` (see [`SCALAR_INDEX_COLUMNS`]).
-    /// The index lets `/list` cursor pages do an index range scan
-    /// instead of a full-fragment scan and lets the leading
+    /// Accepts the columns in [`SCALAR_INDEX_COLUMNS`]: `id` to speed
+    /// up merge-insert match-finding on the write path, and
+    /// `_ingested_at` to let `/list` cursor pages do an index range
+    /// scan instead of a full-fragment scan and let the leading
     /// `ORDER BY _ingested_at` short-circuit the in-memory sort.
+    ///
+    /// New namespaces get the `id` index automatically on first
+    /// write; this endpoint is the maintenance path for building it
+    /// on namespaces created before auto-indexing existed.
     ///
     /// Idempotent: `lancedb`'s `IndexBuilder` defaults to
     /// `replace=true`, so a repeat call rebuilds the index in place
     /// rather than failing.
     ///
     /// Returns [`FirnflowError::Unsupported`] for namespaces whose
-    /// tables pre-date the `_ingested_at` column — same gate the
-    /// `/list` endpoint applies.
+    /// tables pre-date the `_ingested_at` column when that column is
+    /// requested — same gate the `/list` endpoint applies.
     ///
     /// Like the other index builders, this is potentially expensive
     /// on large tables; the API handler runs it in a background task.
@@ -1075,12 +1170,7 @@ impl NamespaceManager {
         ns: &NamespaceId,
         column: &str,
     ) -> Result<(), FirnflowError> {
-        if !SCALAR_INDEX_COLUMNS.contains(&column) {
-            return Err(FirnflowError::InvalidRequest(format!(
-                "scalar index column {column:?} is not supported in v1; \
-                 valid columns: {SCALAR_INDEX_COLUMNS:?}"
-            )));
-        }
+        validate_scalar_index_column(column)?;
 
         let info = self.resolve_schema_info(ns).await?.ok_or_else(|| {
             FirnflowError::InvalidRequest(format!(
@@ -1818,6 +1908,22 @@ mod tests {
     #[test]
     fn cursor_rejects_non_hex() {
         assert!(decode_list_cursor(&"z".repeat(32)).is_err());
+    }
+
+    #[test]
+    fn scalar_index_column_validation() {
+        // Both supported columns pass.
+        assert!(validate_scalar_index_column("id").is_ok());
+        assert!(validate_scalar_index_column(INGESTED_AT_COLUMN).is_ok());
+        // Anything else is a 400-mapped InvalidRequest.
+        assert!(matches!(
+            validate_scalar_index_column("vector"),
+            Err(FirnflowError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            validate_scalar_index_column("text"),
+            Err(FirnflowError::InvalidRequest(_))
+        ));
     }
 
     #[test]

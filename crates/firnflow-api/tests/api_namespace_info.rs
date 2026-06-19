@@ -99,7 +99,9 @@ async fn info_returns_namespace_metadata() {
     assert!(info["fragment_count"].as_u64().unwrap() >= 1);
     assert_eq!(info["has_vector_index"], json!(false));
     assert_eq!(info["has_fts_index"], json!(false));
-    assert_eq!(info["has_scalar_index"], json!(false));
+    // The first upsert auto-builds a BTree on `id`, so the scalar-index
+    // flag is set even before any explicit index build.
+    assert_eq!(info["has_scalar_index"], json!(true));
     assert!(
         info["table_version"].as_u64().unwrap() >= 1,
         "table version advances on commits"

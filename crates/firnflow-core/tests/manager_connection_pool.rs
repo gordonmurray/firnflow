@@ -295,8 +295,10 @@ async fn handle_evicted_after_scalar_index_build() {
 
     // Reject unsupported columns — the validation lives in
     // `NamespaceManager::create_scalar_index`, not the API layer.
+    // (`id` and `_ingested_at` are the supported columns; `vector` is
+    // not.)
     let err = manager
-        .create_scalar_index(&ns, "id")
+        .create_scalar_index(&ns, "vector")
         .await
         .expect_err("must reject non-whitelisted column");
     let msg = err.to_string();

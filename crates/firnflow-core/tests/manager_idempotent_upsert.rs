@@ -343,3 +343,50 @@ async fn concurrent_merge_insert_same_id_keeps_single_row() {
          untouched id=2 row remain (no duplicates, no lost neighbour)"
     );
 }
+
+/// A namespace's first write auto-builds a BTree on `id` so later
+/// merge-insert batches find their matches through the index instead
+/// of scanning every fragment (issue #77). The maintenance path —
+/// building the same index explicitly through `create_scalar_index`
+/// — must also succeed and be idempotent for namespaces created
+/// before auto-indexing existed.
+#[tokio::test]
+#[ignore]
+async fn first_upsert_auto_builds_id_index() {
+    let manager = manager();
+    let ns = NamespaceId::new(unique_namespace("idem-idindex")).unwrap();
+
+    manager
+        .upsert(&ns, vec![row(1, unit_vector(0), "v1")])
+        .await
+        .expect("first upsert");
+
+    let info = manager.info(&ns).await.expect("info").expect("namespace");
+    assert!(
+        info.has_scalar_index,
+        "the first write must auto-build a scalar (BTree) index on id"
+    );
+    assert_eq!(info.row_count, 1, "the auto-index must not drop the row");
+
+    // A second write into the now-indexed namespace still merges
+    // correctly (the index is on the write-path lookup, not a barrier).
+    manager
+        .upsert(&ns, vec![row(2, unit_vector(1), "v2")])
+        .await
+        .expect("second upsert");
+    let info = manager.info(&ns).await.expect("info").expect("namespace");
+    assert_eq!(info.row_count, 2, "second distinct id appends a row");
+
+    // Maintenance path: building the id index explicitly is idempotent
+    // (lancedb's IndexBuilder defaults to replace=true), so an operator
+    // can run it on a pre-existing namespace without it failing.
+    manager
+        .create_scalar_index(&ns, "id")
+        .await
+        .expect("explicit id index rebuild");
+    let info = manager.info(&ns).await.expect("info").expect("namespace");
+    assert!(
+        info.has_scalar_index,
+        "id index still present after rebuild"
+    );
+}

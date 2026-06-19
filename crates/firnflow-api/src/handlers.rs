@@ -42,6 +42,22 @@ pub struct DeleteResponse {
     pub objects_deleted: usize,
 }
 
+/// Optional body of `POST /ns/{namespace}/scalar-index`. Selects the
+/// column to build the BTree on; omitting the body (or the field)
+/// keeps the historical default of `_ingested_at`.
+#[derive(Debug, Deserialize)]
+pub struct ScalarIndexRequest {
+    /// Column to index: `id` (write-path merge-insert lookups) or
+    /// `_ingested_at` (the `/list` ordering column). Defaults to
+    /// `_ingested_at`.
+    #[serde(default = "default_scalar_index_column")]
+    pub column: String,
+}
+
+fn default_scalar_index_column() -> String {
+    "_ingested_at".to_string()
+}
+
 /// Body of `POST /ns/{namespace}/warmup`. A list of query
 /// parameters the operator wants pre-populated in the cache.
 #[derive(Debug, Deserialize)]
@@ -379,19 +395,31 @@ pub async fn create_fts_index(
     ))
 }
 
-/// Build a BTree scalar index on `_ingested_at`. Same
+/// Build a BTree scalar index on a namespace column. Same
 /// 202-with-`operation_id` pattern as `/fts-index`; poll
 /// `GET /operations/{operation_id}` for completion, or watch
 /// `firnflow_index_build_duration_seconds{kind="scalar"}`.
 ///
-/// v1 hardcodes the column to `_ingested_at` to mirror the same
-/// constraint `/list` puts on `order_by`. Future user-column ordering
-/// adds a body parameter at that point.
+/// The column comes from an optional JSON body
+/// (`{"column": "id"}`); with no body it defaults to `_ingested_at`,
+/// preserving the original no-body behaviour. Valid columns are `id`
+/// (write-path merge-insert lookups — the maintenance path for
+/// namespaces created before auto-indexing) and `_ingested_at` (the
+/// `/list` ordering column). An unsupported column is rejected with
+/// a synchronous `400` before any background work starts.
 pub async fn create_scalar_index(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
+    body: Option<Json<ScalarIndexRequest>>,
 ) -> Result<(StatusCode, Json<OperationAccepted>), ApiError> {
     let ns = NamespaceId::new(namespace)?;
+    let column = body
+        .map(|Json(req)| req.column)
+        .unwrap_or_else(default_scalar_index_column);
+
+    // Reject an unsupported column up front so the caller gets a 400
+    // rather than a 202 followed by a log-only background failure.
+    firnflow_core::validate_scalar_index_column(&column).map_err(ApiError::Core)?;
 
     let operation_id = state
         .operations
@@ -402,7 +430,7 @@ pub async fn create_scalar_index(
     let ns_owned = ns.clone();
     let op_for_task = operation_id.clone();
     tokio::spawn(async move {
-        match service.create_scalar_index(&ns_owned, "_ingested_at").await {
+        match service.create_scalar_index(&ns_owned, &column).await {
             Ok(()) => operations.succeed(&op_for_task),
             Err(e) => {
                 tracing::error!(
