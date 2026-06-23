@@ -1,0 +1,19 @@
+{
+  "dataset":"quora",
+  "namespace":"beir-quora",
+  "k":100,
+  "nprobes":20,
+  "num_queries":10000,
+  "total_search_time_s":1334.6454739571,
+  "qps":7.4926264653,
+  "latency_p50_ms":4247.5321292877,
+  "latency_p95_ms":5051.5991806984,
+  "latency_p99_ms":5482.4704957008,
+  "scores":{
+    "map":0.793900056,
+    "ndcg@10":0.8308505796,
+    "ndcg@100":0.8496614956,
+    "recall@10":0.91959335,
+    "recall@100":0.9872823138
+  }
+}

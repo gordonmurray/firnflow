@@ -1,0 +1,19 @@
+{
+  "dataset":"trec-covid",
+  "namespace":"beir-trec-covid",
+  "k":100,
+  "nprobes":20,
+  "num_queries":50,
+  "total_search_time_s":129.3139007092,
+  "qps":0.3866560341,
+  "latency_p50_ms":86189.9154186249,
+  "latency_p95_ms":86745.5203294754,
+  "latency_p99_ms":86785.8521437645,
+  "scores":{
+    "map":0.1343842029,
+    "ndcg@10":0.8366974987,
+    "ndcg@100":0.6519807164,
+    "recall@10":0.0229831755,
+    "recall@100":0.1628384897
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "dataset":"webis-touche2020",
+  "namespace":"beir-webis-touche2020",
+  "k":100,
+  "nprobes":20,
+  "num_queries":49,
+  "total_search_time_s":81.7935416698,
+  "qps":0.599069303,
+  "latency_p50_ms":44576.607465744,
+  "latency_p95_ms":56604.4108867645,
+  "latency_p99_ms":58330.1083469391,
+  "scores":{
+    "map":0.1585682293,
+    "ndcg@10":0.2682363558,
+    "ndcg@100":0.3492869719,
+    "recall@10":0.1644805905,
+    "recall@100":0.4138697726
+  }
+}

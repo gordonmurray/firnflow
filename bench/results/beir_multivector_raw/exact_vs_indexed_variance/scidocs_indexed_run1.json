@@ -1,0 +1,19 @@
+{
+  "dataset":"scidocs",
+  "namespace":"beir-scidocs",
+  "k":100,
+  "nprobes":20,
+  "num_queries":1000,
+  "total_search_time_s":438.8301882744,
+  "qps":2.2787857962,
+  "latency_p50_ms":13918.0337190628,
+  "latency_p95_ms":17155.122756958,
+  "latency_p99_ms":20846.7916917801,
+  "scores":{
+    "map":0.148400877,
+    "ndcg@10":0.2106890038,
+    "ndcg@100":0.2858191134,
+    "recall@10":0.2196833333,
+    "recall@100":0.4371333333
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "dataset":"scifact",
+  "namespace":"beir-scifact",
+  "k":100,
+  "nprobes":20,
+  "num_queries":300,
+  "total_search_time_s":93.6627106667,
+  "qps":3.2029822526,
+  "latency_p50_ms":9719.2784547806,
+  "latency_p95_ms":12487.6887440681,
+  "latency_p99_ms":14462.4683594704,
+  "scores":{
+    "map":0.7108031485,
+    "ndcg@10":0.757013169,
+    "ndcg@100":0.7747698799,
+    "recall@10":0.9002222222,
+    "recall@100":0.9766666667
+  }
+}

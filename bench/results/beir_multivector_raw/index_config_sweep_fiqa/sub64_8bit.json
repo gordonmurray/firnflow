@@ -1,0 +1,19 @@
+{
+  "dataset":"fiqa",
+  "namespace":"beir-fiqa",
+  "k":100,
+  "nprobes":20,
+  "num_queries":648,
+  "total_search_time_s":378.211101532,
+  "qps":1.7133288721,
+  "latency_p50_ms":17744.9790239334,
+  "latency_p95_ms":28700.1120090485,
+  "latency_p99_ms":32455.0717234611,
+  "scores":{
+    "map":0.3517080622,
+    "ndcg@10":0.4106312148,
+    "ndcg@100":0.4722523005,
+    "recall@10":0.4760437608,
+    "recall@100":0.7090355975
+  }
+}

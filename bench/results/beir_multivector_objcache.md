@@ -25,9 +25,10 @@ cost and latency.
 
 ## Setup
 
-- **Model / encoding:** LateOn (ColBERT-style late interaction), 128-dim
-  per-token vectors, via PyLate. One vector per token, so the per-document vector
-  count varies by dataset (dataset means range ~16 to ~237; see §1/§2).
+- **Model / encoding:** `lightonai/LateOn` (ColBERT-style late interaction),
+  128-dim per-token vectors, via PyLate `1.6.0` (sentence-transformers `5.3.0`),
+  encoder document length `300` tokens. One vector per token, so the per-document
+  vector count varies by dataset (dataset means range ~16 to ~237; see §1/§2).
 - **Engine:** Firn `0.9.2`. Storage on **real AWS S3** in `eu-west-1` (not
   loopback MinIO). All eight quality datasets were loaded and scored on this one
   version via `/import`, so the quality table is single-version and internally
@@ -35,18 +36,62 @@ cost and latency.
   datasets were re-run on `0.9.2` to remove that confound — see Caveats.)
 - **Index / query:** IVF_PQ vector index, `num_sub_vectors=64`, `num_bits=8`
   (default), queried at `nprobes=20`, `k=100`. Late-interaction (MaxSim) scoring.
-- **Object cache:** read-through byte-range cache on local NVMe, 100 GiB budget,
-  enabled with `FIRNFLOW_OBJECT_CACHE_ENABLED=true`.
-- **Host:** all numbers reported here were measured on a single 32-vCPU box
-  (g4dn.8xlarge, 1×T4) in `eu-west-1`. Quality is host-independent; latency/QPS
-  are CPU-bound, so treat the absolute QPS as host-specific (see Caveats).
+- **Object cache:** read-through byte-range cache on local NVMe
+  (`FIRNFLOW_OBJECT_CACHE_DIR=/object-cache`), enabled with
+  `FIRNFLOW_OBJECT_CACHE_ENABLED=true`, a 100 GiB byte budget
+  (`FIRNFLOW_OBJECT_CACHE_BYTES=107374182400`), and the per-entry cap left at its
+  256 MiB default (`FIRNFLOW_OBJECT_CACHE_MAX_ENTRY_BYTES`). The `/import` path ran
+  with `FIRNFLOW_IMPORT_MAX_BYTES=0` (no cap) and `FIRNFLOW_MAX_BODY_BYTES` at
+  32 MiB.
+- **Host:** all numbers reported here were measured on a single box
+  (g4dn.8xlarge: 32 vCPU, 128 GiB RAM, 1×T4 GPU) in `eu-west-1`, reading from an
+  S3 bucket in the same region. Quality is host-independent; latency/QPS are
+  CPU-bound, so treat the absolute QPS as host-specific (see Caveats).
+- **Instrumentation:** the cache numbers come in two batches. The fiqa cache A/B
+  (§2) was measured on released `0.9.2`, whose object-cache counters only exist
+  when the cache is on. The 1M-document NQ A/B (§2) was measured on an
+  instrumented build — `0.9.2` plus an always-on backend read counter
+  (`firnflow_object_store_get_bytes_total`) that records bytes fetched from S3
+  whether the cache is on *or* off. That counter is what lets the NQ run report a
+  real cache-*off* byte figure; quality numbers are unaffected by it.
+
+## What this does and does not show
+
+A one-screen summary before the detail, since quality and performance live on
+different axes here:
+
+- **Shows (quality, host-independent):** Firn's multivector path reaches the
+  expected BEIR quality — it matches published ColBERT-style baselines on the
+  control sets (scifact, nfcorpus) and tracks each task's known difficulty across
+  eight datasets (§1).
+- **Shows (cost, the headline cache result):** on object storage, the local NVMe
+  object cache cuts S3 read **bytes** for repeated query traffic — ~3× cold-to-warm
+  on fiqa (57k docs) and **~130×** cache-off-vs-cache-on on NQ (1M docs), measured
+  directly off the backend byte counter (§2).
+- **Shows (ingest):** `/import` loads a multi-hundred-thousand-document corpus in
+  one storage commit, ~3 orders of magnitude faster than per-batch `/upsert` (§3).
+- **Does not show a latency win from the cache on multivector.** MaxSim scoring is
+  CPU-bound, so query latency is flat whether the cache is on or off (§2). The
+  cache is a storage-*cost* lever here, not a latency lever. (Single-vector search
+  is I/O-bound and does see cache latency wins; that is a different workload.)
+- **Does not claim IVF_PQ is free.** At moderate corpus sizes the approximate index
+  can cost real recall versus exact MaxSim, and the cost grows with corpus size
+  (§1, Caveats). Measure exact-vs-indexed before assuming the index is lossless.
+- **Latency/QPS numbers are from one 32-vCPU box and are not portable.** They show
+  where the time goes, not a tuned throughput ceiling (Caveats).
 
 ## 1. Retrieval quality (eight BEIR datasets)
 
 All eight datasets were loaded and scored on a single Firn version (`0.9.2`) via
-`/import`, so the table is internally consistent. The `vec/doc` column is the mean
-per-document vector count (one vector per token); it is the main driver of query
-*latency* (§2), but, as it turns out, not of the quality differences (see Caveats).
+`/import`, so the table is internally consistent. Each row is scored over the
+**full official BEIR query set** for that dataset (the `queries` column below — not
+the split-B subset used for the latency A/B in §2). These quality numbers are
+independent of the object cache: it is a byte-range cache *below* the query path,
+so it changes only how bytes are fetched, never the result set — quality is
+identical with the cache on or off, which is why §2 measures only latency and S3
+bytes per cache cell, not quality. The `vec/doc` column is the mean per-document
+vector count (one vector per token); it is the main driver of query *latency* (§2),
+but, as it turns out, not of the quality differences (see Caveats).
 
 | Dataset | docs | queries | vec/doc | ndcg@10 | ndcg@100 | recall@10 | recall@100 | map |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -70,11 +115,11 @@ published ColBERT-style numbers: scifact (0.7533) and nfcorpus (0.3763) line up
 with the PLAID baselines (SciFact ~0.766, NFCorpus ~0.378). The two largest-corpus
 datasets with a like-for-like history (fiqa, 57k docs, and trec-covid, 171k) scored
 below their earlier 0.9.0 numbers (fiqa 0.4563→0.4124, trec-covid 0.8367→0.5794); a
-direct exact-vs-indexed check on fiqa shows the **IVF_PQ index itself** is the main
-cause, giving up ~22% of ndcg@10 versus exact (un-indexed) MaxSim search (see
-Caveats). This is an index-recall effect, not
-a document-length one: per-document vector counts do not predict it (nfcorpus has
-the most vectors per document of any set here, yet is unaffected).
+direct exact-vs-indexed check shows the **IVF_PQ index itself** is the main cause,
+and the loss scales with corpus size (negligible at ≤25k docs, ~22% of nDCG@10 at
+fiqa's 57k) — see *Index recall vs corpus size* just below. It is an index-recall
+effect, not a document-length one: per-document vector counts do not predict it
+(nfcorpus has the most vectors per document of any set here, yet is unaffected).
 
 **Calibration against published baselines.** For the two datasets with external
 reference points:
@@ -89,6 +134,38 @@ here) and lands within ~1–2% of the PLAID baselines on both, so quality holds 
 control datasets. (NFCorpus has no earlier Firn number — the prior SciFact gists
 were SciFact-only. PLAID figures are the published ColBERT-style BEIR numbers
 Antoine cited: SciFact 76.61, NFCorpus 37.79.)
+
+### Index recall vs corpus size (exact vs IVF_PQ)
+
+The IVF_PQ index is an *approximate* nearest-neighbour structure, so the natural
+question is how much retrieval quality it gives up versus exact (un-indexed) MaxSim
+search on the same data. We measured exact-vs-indexed on three corpora spanning an
+order of magnitude in size, identical `nprobes=20` / `k=100` / `0.9.2` / real-S3
+setup, scoring the full official query set each time:
+
+| dataset | docs | exact ndcg@10 | IVF_PQ ndcg@10 | Δ | exact recall@10 | IVF_PQ recall@10 |
+|---|---:|---:|---:|---:|---:|---:|
+| arguana | 8.7k | 0.5095 | 0.5404 (×3: 0.5413/0.5381/0.5417) | **+6%** | 0.786 | 0.806 |
+| scidocs | 25k | 0.2180 | 0.2107 | −3% | 0.228 | 0.220 |
+| fiqa | 57k | 0.5264 | 0.4084 | **−22%** | 0.609 | 0.468 |
+
+The loss **scales with corpus (index) size**, it is not a per-dataset quirk: at
+8.7k documents the index matches exact and even edges slightly above it (the
+approximate reordering happens to land higher on nDCG, and three rebuilds agree to
+within ~0.004, far inside the exact-vs-indexed gap); at 25k the gap is ~3%, inside
+the noise; by 57k the index gives up ~22% of nDCG@10 and ~23% of recall@10. It does
+*not* track document length — nfcorpus has the most vectors per document of any set
+here (237) and sits in the stable small-corpus regime. The arguana column carries
+three independent index rebuilds precisely to show that run-to-run training jitter
+(~0.004) is an order of magnitude smaller than the size-driven trend, so the fiqa
+drop is a real recall effect and not a single unlucky training draw.
+
+Practically: at moderate multivector scale, **measure exact search before
+defaulting to IVF_PQ** — exact retrieved materially better on fiqa for no extra
+latency (the per-query cost is dominated by MaxSim either way; see §2). The index
+earns its keep once the corpus is large enough that an exact scan is prohibitive.
+This is why the §1 table — which reports the default IVF_PQ-indexed numbers — shows
+fiqa and trec-covid below their quality ceiling.
 
 ## 2. The object cache: a storage-cost win, not a latency win (for this workload)
 
@@ -149,6 +226,56 @@ up queries. This is the opposite of single-vector search, which is I/O-bound and
 does see large cache speed-ups (Firn's single-vector first-query profile showed
 roughly 30× on warm-novel queries). The honest summary: **on multivector, the
 object cache is a storage-cost lever, not a latency lever.**
+
+### The same A/B at 1M documents (NQ): a true cache-off arm, ~130× bytes
+
+The fiqa A/B above could only difference *cache-on* byte counters (cold-on's
+empty-cache first touch vs warm-on), because on released `0.9.2` the object-cache
+byte counter does not exist when the cache is off. To get a real cache-off
+measurement — and to see whether the storage saving holds at scale — the same A/B
+was repeated on **NQ (Natural Questions), 1,000,000 multivector documents**, a
+single `/import` fragment, on the instrumented build that carries the always-on
+backend byte counter `firnflow_object_store_get_bytes_total`. Same shape as fiqa:
+IVF_PQ `num_sub_vectors=64`/`num_bits=8`, `nprobes=20`, `k=100`, concurrency 32,
+500 measured queries per cell, split B disjoint from the split-A warming set so no
+query is a result-cache replay.
+
+| cell | object cache | process | QPS | p50 | p95 | backend S3 reads | backend S3 bytes |
+|---|---|---|---:|---:|---:|---:|---:|
+| cold-off | off | cold | 0.65 | 48.5 s | 55.0 s | 87,898 | 372 GB |
+| cold-on | on, empty | cold | 0.68 | 46.7 s | 53.8 s | 28,114 | 9.70 GB |
+| warm-off | off | cold | 0.65 | 48.0 s | 54.8 s | 87,175 | **361 GB** |
+| warm-on | on, warm | cold | 0.68 | 46.4 s | 54.0 s | 24,039 | **2.79 GB** |
+
+(The "backend S3 bytes" column is `firnflow_object_store_get_bytes_total` over the
+measured pass — the real bytes fetched from S3, recorded identically whether the
+cache is on or off. The cold-off cell read 372 GB; warm-off, the clean cache-off
+control, read 361 GB.)
+
+**The headline at 1M scale: ~130× fewer S3 bytes with the cache on.** For the same
+500 NQ queries, cache-off (`warm-off`) pulled **361 GB** from S3 while cache-on
+warm (`warm-on`) pulled **2.79 GB** — a **129.6×** reduction, read straight off the
+same backend counter on both arms (no inference from an empty-cache proxy this
+time). Even *cold* the cache cuts bytes ~38× (372 GB → 9.70 GB), because within a
+single 500-query batch many queries re-read the same IVF centroid, PQ codebook, and
+partition byte ranges, and the cache serves the repeats from NVMe after the first
+touch. Cache-off has no such reuse: every query re-fetches those ranges from S3,
+which is why 500 queries balloon to ~360 GB.
+
+**Latency is still flat, now confirmed at 1M.** Every cell lands at ~46–48 s p50
+regardless of cache state — the cache changes the S3 byte bill by two orders of
+magnitude and does not move latency at all, because MaxSim over a 1M-document
+candidate set is CPU-bound. The result-cache guardrail held: `firnflow_cache_hits_total`
+was 0 in all four cells. So the fiqa conclusion is not a small-corpus artifact:
+**at 1M documents the object cache is, again, a storage-cost lever and not a
+latency lever for multivector search.**
+
+**A note on the absolute latency.** The ~46 s p50 is the *saturated* latency at
+concurrency 32 on a 32-vCPU box — every core is busy scoring MaxSim, so queries
+queue behind each other. A 10-query probe fired at the same concurrency against a
+warmed process (no queueing) measured ~14.5 s per query, so ~14.5 s is closer to
+the single-query cost and ~46 s is what sustained 32-way load looks like on this
+host. Neither is a tuned number; both are CPU-bound and scale with core count.
 
 **`nprobes` is flat at this scale.** Sweeping `nprobes` over 8, 20, 50, 100 on
 fiqa (full 648-query set) gave **identical quality** (ndcg@10 0.4110 at every
@@ -265,36 +392,53 @@ document first load practical at all.
 
 ## 4. Practical guidance
 
-- For large multivector first loads, use `/import` (single commit), not
-  per-batch `/upsert`.
-- The object cache's value on multivector search is cutting S3 request and byte
-  cost (~3× cold-to-warm byte reuse with the cache on, measured on fiqa); it does
-  not lower multivector query latency, which is CPU-bound. For genuinely I/O-bound
-  workloads (single-vector, or an index that does not fit in RAM) the cache also
-  cuts latency.
-- `nprobes=20` is a reasonable default at this scale (quality flat from 8 to 100).
-  To improve multivector QPS, the lever is the MaxSim / candidate-set cost
-  (centroid pruning before full scoring, scoring-path parallelism), not the cache
-  or `nprobes`.
-- **Multivector QPS is set mostly by document length, then corpus size.** A large
-  corpus of short documents is fast (quora, 523k, ~16 vectors/doc, 4.2 s p50);
-  longer documents and a larger candidate set both slow it (webis, ~154
-  vectors/doc, 35 s). Plan capacity around document length and candidate-set size,
-  not row count alone.
-- **Size the object cache to hold the working set.** Its ~3× S3 saving needs
-  `FIRNFLOW_OBJECT_CACHE_BYTES` to cover the index byte-ranges plus the candidate
-  vectors a query reads; below that the cache thrashes and the saving disappears.
-- **Index config:** `num_sub_vectors=64`, `num_bits=8` is a safe default.
-  `num_bits=4` roughly halves index storage; in our fiqa sweep its quality cost
-  was clear only at fewer sub-vectors (32/4 dropped to 0.392, while 64/4 at 0.4129
-  was on par with 64/8 at 0.4106), so it *can* cost quality — validate the recall
-  cost per corpus before using it.
-- **At this scale, measure exact (un-indexed) search before defaulting to IVF_PQ.**
-  On fiqa the IVF_PQ index cost ~22% of ndcg@10 for no latency benefit (exact and
-  indexed per-query p50 within ~8%); exact retrieved materially better. The index
-  earns its keep once the corpus is large enough that an exact scan is prohibitive,
-  so for moderate-scale multivector it is worth comparing exact vs indexed rather
-  than assuming the index is free (see Caveats).
+**Recommended starting config for multivector on object storage:**
+
+| knob | recommended | why |
+|---|---|---|
+| first load | `/import` (Arrow IPC, one commit) | per-batch `/upsert` decays to ~30 h on 382k docs; `/import` does it in seconds (§3) |
+| later updates | `/upsert` (idempotent by id) | `/import` is insert-only; `/upsert` is the in-place update/merge path |
+| vector index | IVF_PQ `num_sub_vectors=64`, `num_bits=8` | safe default; 32/8 was marginally better on fiqa, 4-bit only when storage-bound |
+| index vs exact | **measure both** at your corpus size | IVF_PQ loss grows with size: none ≤25k, ~22% at 57k (§1) |
+| `nprobes` | 20 | quality flat 8→100, latency unchanged (CPU-bound) |
+| object cache | on, `FIRNFLOW_OBJECT_CACHE_BYTES` ≥ working set | cuts S3 byte cost (~130× at 1M); does not cut multivector latency |
+
+**Ingest — `/import` vs `/upsert`.** Use `/import` for the *first* bulk load of a
+namespace: it streams the whole corpus as one Arrow IPC body and appends it in a
+single storage commit, which is what makes a 382k-document load take seconds
+instead of ~30 hours (§3). It is insert-only and keyed by row position. For
+*incremental* writes after that — updating or re-adding documents by id — use
+`/upsert`, which is idempotent by id (latest write wins). Reach for `/import` again
+only when reloading a namespace from scratch.
+
+**The object cache is a storage-cost lever, not a latency lever (on multivector).**
+Its value here is cutting S3 request and byte cost: **~130× fewer S3 bytes** on the
+1M-document NQ A/B (cache-off 361 GB vs cache-on warm 2.79 GB for the same 500
+queries, §2), and ~3× cold-to-warm on fiqa. It does **not** lower multivector query
+latency, which is CPU-bound on MaxSim — every NQ and fiqa cache cell sits at the
+same p50 regardless of cache state. (Single-vector search *is* I/O-bound and does
+see large cache latency wins — a different workload; do not carry the latency claim
+across.) **Size the cache to hold the working set:** the saving needs
+`FIRNFLOW_OBJECT_CACHE_BYTES` to cover the index byte-ranges plus the candidate
+vectors a query reads; below that the cache thrashes and the saving largely
+disappears (§2, the 256 MiB run).
+
+**Multivector QPS is set mostly by document length, then corpus size.** A large
+corpus of short documents is fast (quora, 523k, ~16 vectors/doc, 4.2 s p50); longer
+documents and a larger candidate set both slow it (webis, ~154 vectors/doc, 35 s).
+Plan capacity around document length and candidate-set size, not row count alone.
+To improve QPS the lever is the MaxSim / candidate-set cost (centroid pruning before
+full scoring, scoring-path parallelism), not the cache or `nprobes`.
+
+**Index config.** `num_sub_vectors=64`, `num_bits=8` is a safe default. `num_bits=4`
+roughly halves index storage; in our fiqa sweep its quality cost was clear only at
+fewer sub-vectors (32/4 dropped to 0.392, while 64/4 at 0.4129 was on par with 64/8
+at 0.4106), so it *can* cost quality — validate the recall cost per corpus before
+using it. At moderate scale, also compare exact (un-indexed) search before
+defaulting to IVF_PQ: the index loss grows with corpus size (none at ≤25k docs,
+~22% of nDCG@10 at fiqa's 57k, §1), and at that scale exact retrieved materially
+better for no extra latency. The index earns its keep once the corpus is large
+enough that an exact scan is prohibitive.
 
 ## Caveats
 
@@ -303,40 +447,36 @@ document first load practical at all.
   is not portable. Quality is host-independent.
 - **Multivector QPS is modest (~1.8 on this box) and CPU-bound.** These numbers
   are not a tuned latency result; they characterise where the time goes.
-- **The IVF_PQ index loses significant recall on fiqa (measured); the broader
-  pattern is not fully pinned down.** A direct exact-vs-indexed check on fiqa
-  (identical data, full 648-query set, `nprobes=20`, `k=100`) measured **exact
-  MaxSim ndcg@10 0.5264 (recall@10 0.609) vs IVF_PQ 0.4084 (recall@10 0.468) — the
-  index gives up ~22% of ndcg@10 and ~23% of recall@10**, at no latency benefit
-  (exact vs indexed per-query p50 18.4 s vs 19.9 s). Exact (0.5264) is above *both*
-  earlier indexed fiqa runs (a 0.9.0 load at 0.4563 and a 0.9.2 re-load at ~0.41),
-  so those were just different lossy IVF_PQ training draws under the exact ceiling,
-  not a version regression (both versions pin the same vector-index stack). Index
-  parameters do not rescue it (`num_sub_vectors` / `num_bits` moved fiqa only within
-  0.392–0.421; `nprobes` 8–100 made no difference). **This exact-vs-indexed test was
-  run only on fiqa.** Across the suite, the two datasets that fell across the
-  0.9.0→0.9.2 reload (fiqa 0.4563→0.4124, trec-covid 0.8367→0.5794) are the two
-  largest corpora with a like-for-like baseline, while the smaller sets (≤25k docs)
-  are stable (within ±0.006). It does **not** track
-  document length: per-document vector counts (nfcorpus 237, scidocs 188, arguana
-  177, trec-covid 170, fiqa 134) put the *stable* nfcorpus above the *affected*
-  fiqa, so an earlier "long-document" framing was wrong. The likely common cause is
-  IVF_PQ recall loss that worsens with corpus/index size, but it is not isolated
-  per-dataset and is a follow-up. The id-mapping was audited and is sound, so this
-  is an index-level effect, not a harness artifact. **Practical takeaway: at this
-  scale, exact (un-indexed) multivector search can retrieve materially better than
-  IVF_PQ for no extra latency (shown on fiqa); the table reports the default
-  IVF_PQ-indexed numbers.** The cache and latency results in §2/§3 compare a
-  namespace against itself, so they are unaffected by this.
+- **The IVF_PQ index gives up recall versus exact MaxSim, and the loss grows with
+  corpus size.** This is measured across three corpora in §1 (*Index recall vs
+  corpus size*): arguana (8.7k) shows no loss (indexed even edges ~6% above exact,
+  three rebuilds agreeing to ~0.004); scidocs (25k) is within ~3%; fiqa (57k) gives
+  up ~22% of nDCG@10 and ~23% of recall@10 (exact 0.5264/0.609 vs IVF_PQ
+  0.4084/0.468), at no latency benefit (per-query p50 18.4 s exact vs 19.9 s
+  indexed). On fiqa, index parameters do not rescue it (`num_sub_vectors` /
+  `num_bits` moved it only within 0.392–0.421; `nprobes` 8–100 made no difference),
+  and exact sits above *both* earlier indexed fiqa loads (0.9.0 at 0.4563, 0.9.2 at
+  ~0.41), so those were lossy training draws under the exact ceiling, not a version
+  regression — both versions pin the same vector-index stack. The id-mapping was
+  audited and is sound, so this is an index-level effect, not a harness artifact.
+  It does **not** track document length (nfcorpus has the most vectors/doc here, 237,
+  yet is in the stable small-corpus regime). The exact-vs-indexed comparisons each
+  hold corpus and query set fixed, so the §1 table reports the default
+  IVF_PQ-indexed numbers; the cache and latency results in §2/§3 likewise compare a
+  namespace against itself and are unaffected. **Practical takeaway: at moderate
+  multivector scale, measure exact (un-indexed) search before assuming the index is
+  free — it can retrieve materially better for no extra latency.**
 - **The cache figures are for a single-fragment namespace** (the recommended
   state after `/import`). A heavily fragmented namespace would show a larger
   cache effect, but that is the anti-pattern `/import` exists to avoid.
 
 ## Reusable artifact
 
-Encoded LateOn embeddings for seven of the eight datasets (all except scifact) are
-on S3, so future runs (and CI) can skip GPU encoding and load straight through
-`/import`.
+Encoded LateOn embeddings for seven of the eight quality datasets (all except
+scifact), plus a 1M-document NQ performance fixture, are on S3, so future runs (and
+CI) can skip GPU encoding and load straight through `/import`. A committed manifest
+([`beir_multivector_embeddings_manifest.jsonl`](beir_multivector_embeddings_manifest.jsonl))
+lists each prefix with its document count, mean document length, and byte size.
 
 - **Location:** a private S3 bucket in `eu-west-1`, under an `embeddings/<dataset>/`
   prefix (not public — access needs bucket credentials; available on request).
@@ -349,28 +489,57 @@ on S3, so future runs (and CI) can skip GPU encoding and load straight through
   (relevance judgments), and `id_map.json` (row position → BEIR id, written at
   import time).
 - **Counts:** as in the §1 table (e.g. fiqa 57,638 docs / 648 queries; webis
-  382,545 / 49; quora 522,931 / 10,000).
+  382,545 / 49; quora 522,931 / 10,000). The NQ fixture is the NQ corpus sliced to
+  its first 1,000,000 documents (3,452 queries); it is a *performance* fixture, not
+  a quality one — slicing the corpus drops relevant documents, so its scores are not
+  BEIR-comparable, and it is used only for the §2 cache A/B.
 - **Config to reproduce:** IVF_PQ `num_sub_vectors=64`, `num_bits=8`, `nprobes=20`,
-  `k=100`, cosine distance, firnflow 0.9.2.
+  `k=100`, cosine distance, firnflow 0.9.2 (the NQ cache A/B additionally needs the
+  always-on backend byte counter — an instrumented build, see Setup).
 - **Checksums:** not yet published; a per-object manifest (key, size, sha256) can be
   generated from the prefix on request.
 
 scifact (the small control set) was not uploaded; re-encoding it is cheap.
 
-## Provenance: the exact-vs-indexed fiqa measurement
+## Next steps
 
-The index-recall result in the Caveats is the one conclusion that shifts the story,
-so its raw outputs are committed next to this report:
+- **Wider quality coverage.** The eight datasets here plus the 1M-document NQ
+  fixture prove the path at scale; extending the quality sweep to the remaining
+  larger BEIR tasks (e.g. HotpotQA) would round out the picture, and the committed
+  embeddings make each addition a load-and-score rather than a re-encode.
+- **A late-interaction tuning page** mirroring this report on the docs site, written
+  for discovery rather than audit, so the practical guidance in §4 is easy to find.
+- **Independent comparison.** The embeddings, raw JSON, and config are all committed
+  or available on request, so these numbers can be reproduced and checked against
+  published PLAID / PyLate baselines on the same datasets. Comparisons and
+  contributions are welcome.
 
-- `fiqa_exact_vs_indexed/fiqa_brute.json` — exact MaxSim (no vector index).
-- `fiqa_exact_vs_indexed/fiqa_indexed.json` — IVF_PQ `num_sub_vectors=64`,
-  `num_bits=8`.
+## Provenance
 
-Both are the **full 648-query** official fiqa set, `nprobes=20`, `k=100`, firnflow
-0.9.2, real S3 in `eu-west-1`, scored through the same query and BEIR-eval path as
-the §1 table. Method: re-import `beir-fiqa` via `/import` (single fragment) with the
-vector index skipped and score it (exact), then build the IVF_PQ index on the same
-data and score the identical query set again; the result-cache hit counter was 0
-throughout. (The bench harness defaults to a 50-query quick diagnostic; this run
-used the full 648-query set, which is what the committed JSON and the ~22% figure
-reflect.)
+The two results that most shift the story — the index-recall size trend and the
+1M-document cache A/B — have their raw outputs committed next to this report, so
+the numbers can be audited rather than taken on trust. A full table-to-file map is
+in [`beir_multivector_raw/README.md`](beir_multivector_raw/README.md).
+
+**Exact vs IVF_PQ across corpus sizes (§1).** Each pair holds the corpus and the
+full official query set fixed, `nprobes=20`, `k=100`, firnflow 0.9.2, real S3 in
+`eu-west-1`, scored through the same BEIR-eval path as the §1 table. Method:
+`/import` the corpus as a single fragment with the vector index skipped and score
+it (exact), then build the IVF_PQ index on the same data and score the identical
+query set again; the result-cache hit counter was 0 throughout.
+
+- `fiqa_exact_vs_indexed/fiqa_brute.json` vs `…/fiqa_indexed.json` — fiqa (57k,
+  full 648-query set): exact 0.5264 vs IVF_PQ 0.4084.
+- `beir_multivector_raw/exact_vs_indexed_variance/scidocs_exact.json` vs
+  `…/scidocs_indexed_run1.json` — scidocs (25k): 0.2180 vs 0.2107.
+- `beir_multivector_raw/exact_vs_indexed_variance/arguana_exact.json` vs
+  `…/arguana_indexed_run{1,2,3}.json` — arguana (8.7k): exact 0.5095 vs three index
+  rebuilds 0.5413 / 0.5381 / 0.5417 (the rebuilds quantify the ~0.004 training
+  jitter).
+
+**1M-document cache A/B (§2).** `beir_multivector_raw/nq_cache_ab/` — the four
+NQ cells (`cold-off`, `cold-on`, `warm-off`, `warm-on`) plus their split-A warming
+passes and the uncontended probe. Each JSON carries a `/metrics` snapshot before
+and after the measured pass, including `firnflow_object_store_get_bytes_total` (the
+always-on backend byte counter that gives the cache-off arm its 361 GB figure) and
+`firnflow_cache_hits_total` (the result-cache guardrail, 0 in every cell).

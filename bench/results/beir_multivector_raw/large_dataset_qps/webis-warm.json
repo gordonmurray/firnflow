@@ -1,0 +1,45 @@
+{
+  "dataset": "webis-touche2020",
+  "namespace": "beir-webis-touche2020",
+  "cell": "webis-warm",
+  "split": "b",
+  "num_queries": 24,
+  "concurrency": 32,
+  "nprobes": 20,
+  "k": 100,
+  "wall_s": 39.369269371032715,
+  "qps": 0.6096125323996696,
+  "latency_p50_ms": 35164.687395095825,
+  "latency_p95_ms": 38951.86309814453,
+  "latency_p99_ms": 39244.34720277786,
+  "counters_before": {
+    "firnflow_object_cache_hits_total": 3625.0,
+    "firnflow_object_cache_misses_total": 2388.0,
+    "firnflow_object_cache_inner_gets_total": 2431.0,
+    "firnflow_object_cache_s3_bytes_total": 4094367810.0,
+    "firnflow_object_cache_evictions_total": 0.0,
+    "firnflow_cache_hits_total": 0.0,
+    "firnflow_cache_misses_total": 25.0,
+    "firnflow_s3_requests_total": 25.0
+  },
+  "counters_after": {
+    "firnflow_object_cache_hits_total": 4377.0,
+    "firnflow_object_cache_misses_total": 3810.0,
+    "firnflow_object_cache_inner_gets_total": 3853.0,
+    "firnflow_object_cache_s3_bytes_total": 4276594862.0,
+    "firnflow_object_cache_evictions_total": 0.0,
+    "firnflow_cache_hits_total": 0.0,
+    "firnflow_cache_misses_total": 49.0,
+    "firnflow_s3_requests_total": 49.0
+  },
+  "counters_delta": {
+    "firnflow_object_cache_hits_total": 752.0,
+    "firnflow_object_cache_misses_total": 1422.0,
+    "firnflow_object_cache_inner_gets_total": 1422.0,
+    "firnflow_object_cache_s3_bytes_total": 182227052.0,
+    "firnflow_object_cache_evictions_total": 0.0,
+    "firnflow_cache_hits_total": 0.0,
+    "firnflow_cache_misses_total": 24.0,
+    "firnflow_s3_requests_total": 24.0
+  }
+}

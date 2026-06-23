@@ -1,0 +1,45 @@
+{
+  "dataset": "fiqa",
+  "namespace": "beir-fiqa",
+  "cell": "warm-process",
+  "split": "b",
+  "num_queries": 324,
+  "concurrency": 32,
+  "nprobes": 20,
+  "k": 100,
+  "wall_s": 177.11924505233765,
+  "qps": 1.829276089700247,
+  "latency_p50_ms": 16758.5107088089,
+  "latency_p95_ms": 25580.283868312836,
+  "latency_p99_ms": 28435.540356636047,
+  "counters_before": {
+    "firnflow_object_cache_hits_total": 17303.0,
+    "firnflow_object_cache_misses_total": 20530.0,
+    "firnflow_object_cache_inner_gets_total": 20626.0,
+    "firnflow_object_cache_s3_bytes_total": 1961975088.0,
+    "firnflow_object_cache_evictions_total": 0.0,
+    "firnflow_cache_hits_total": 0.0,
+    "firnflow_cache_misses_total": 324.0,
+    "firnflow_s3_requests_total": 324.0
+  },
+  "counters_after": {
+    "firnflow_object_cache_hits_total": 44952.0,
+    "firnflow_object_cache_misses_total": 30362.0,
+    "firnflow_object_cache_inner_gets_total": 30458.0,
+    "firnflow_object_cache_s3_bytes_total": 2654685664.0,
+    "firnflow_object_cache_evictions_total": 0.0,
+    "firnflow_cache_hits_total": 0.0,
+    "firnflow_cache_misses_total": 648.0,
+    "firnflow_s3_requests_total": 648.0
+  },
+  "counters_delta": {
+    "firnflow_object_cache_hits_total": 27649.0,
+    "firnflow_object_cache_misses_total": 9832.0,
+    "firnflow_object_cache_inner_gets_total": 9832.0,
+    "firnflow_object_cache_s3_bytes_total": 692710576.0,
+    "firnflow_object_cache_evictions_total": 0.0,
+    "firnflow_cache_hits_total": 0.0,
+    "firnflow_cache_misses_total": 324.0,
+    "firnflow_s3_requests_total": 324.0
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "dataset":"nfcorpus",
+  "namespace":"beir-nfcorpus",
+  "k":100,
+  "nprobes":20,
+  "num_queries":323,
+  "total_search_time_s":12.6382687092,
+  "qps":25.5572980313,
+  "latency_p50_ms":1098.0479717255,
+  "latency_p95_ms":2021.8634843826,
+  "latency_p99_ms":2238.7796735764,
+  "scores":{
+    "map":0.1807202582,
+    "ndcg@10":0.3762511452,
+    "ndcg@100":0.3367466173,
+    "recall@10":0.1800375802,
+    "recall@100":0.3225422285
+  }
+}

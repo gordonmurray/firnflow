@@ -1,0 +1,19 @@
+{
+  "dataset":"arguana",
+  "namespace":"beir-arguana",
+  "k":100,
+  "nprobes":20,
+  "num_queries":1406,
+  "total_search_time_s":425.9317150116,
+  "qps":3.3009986119,
+  "latency_p50_ms":9992.4557209015,
+  "latency_p95_ms":15688.785970211,
+  "latency_p99_ms":19242.4565672875,
+  "scores":{
+    "map":0.4323635791,
+    "ndcg@10":0.5094809112,
+    "ndcg@100":0.5494328172,
+    "recall@10":0.7859174964,
+    "recall@100":0.9637268848
+  }
+}

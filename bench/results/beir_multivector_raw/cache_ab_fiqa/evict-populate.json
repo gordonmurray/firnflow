@@ -1,0 +1,45 @@
+{
+  "dataset": "fiqa",
+  "namespace": "beir-fiqa",
+  "cell": "evict-populate",
+  "split": "a",
+  "num_queries": 324,
+  "concurrency": 32,
+  "nprobes": 20,
+  "k": 100,
+  "wall_s": 182.59151673316956,
+  "qps": 1.7744526459763077,
+  "latency_p50_ms": 16851.622104644775,
+  "latency_p95_ms": 26189.91835117339,
+  "latency_p99_ms": 29190.85213899611,
+  "counters_before": {
+    "firnflow_object_cache_hits_total": 0.0,
+    "firnflow_object_cache_misses_total": 0.0,
+    "firnflow_object_cache_inner_gets_total": 0.0,
+    "firnflow_object_cache_s3_bytes_total": 0.0,
+    "firnflow_object_cache_evictions_total": 0.0,
+    "firnflow_cache_hits_total": 0.0,
+    "firnflow_cache_misses_total": 0.0,
+    "firnflow_s3_requests_total": 0.0
+  },
+  "counters_after": {
+    "firnflow_object_cache_hits_total": 10891.0,
+    "firnflow_object_cache_misses_total": 26911.0,
+    "firnflow_object_cache_inner_gets_total": 26975.0,
+    "firnflow_object_cache_s3_bytes_total": 2407005304.0,
+    "firnflow_object_cache_evictions_total": 23194.0,
+    "firnflow_cache_hits_total": 0.0,
+    "firnflow_cache_misses_total": 324.0,
+    "firnflow_s3_requests_total": 324.0
+  },
+  "counters_delta": {
+    "firnflow_object_cache_hits_total": 10891.0,
+    "firnflow_object_cache_misses_total": 26911.0,
+    "firnflow_object_cache_inner_gets_total": 26975.0,
+    "firnflow_object_cache_s3_bytes_total": 2407005304.0,
+    "firnflow_object_cache_evictions_total": 23194.0,
+    "firnflow_cache_hits_total": 0.0,
+    "firnflow_cache_misses_total": 324.0,
+    "firnflow_s3_requests_total": 324.0
+  }
+}
