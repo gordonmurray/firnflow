@@ -385,6 +385,7 @@ fn op_search(
     vectors: Option<Vec<Vec<f32>>>,
     hybrid: bool,
     limit: usize,
+    filter: Option<String>,
     include_vectors: bool,
 ) -> PyResult<Vec<Hit>> {
     // An empty list is "no payload", not an empty vector — otherwise a
@@ -415,6 +416,7 @@ fn op_search(
         k: limit,
         nprobes: None,
         text: query,
+        filter,
         include_vector: include_vectors,
         semantic_cache: None,
     };
@@ -504,7 +506,7 @@ impl Collection {
     }
 
     /// Search this collection. See `Client.search`.
-    #[pyo3(signature = (query=None, *, vector=None, vectors=None, hybrid=false, limit=10, tenant=None, include_vectors=false))]
+    #[pyo3(signature = (query=None, *, vector=None, vectors=None, hybrid=false, limit=10, tenant=None, filter=None, include_vectors=false))]
     #[allow(clippy::too_many_arguments)]
     fn search(
         &self,
@@ -515,6 +517,7 @@ impl Collection {
         hybrid: bool,
         limit: usize,
         tenant: Option<String>,
+        filter: Option<String>,
         include_vectors: bool,
     ) -> PyResult<Vec<Hit>> {
         self.lifecycle.check_open()?;
@@ -530,6 +533,7 @@ impl Collection {
             vectors,
             hybrid,
             limit,
+            filter,
             include_vectors,
         )
     }
@@ -619,7 +623,7 @@ impl Client {
     /// nearest-neighbour search; supplying both (or `hybrid=True`) runs
     /// hybrid (RRF) search. `tenant=` scopes to one tenant's namespace.
     /// Vectors are not echoed back on hits unless `include_vectors=True`.
-    #[pyo3(signature = (query=None, *, vector=None, vectors=None, hybrid=false, limit=10, tenant=None, include_vectors=false))]
+    #[pyo3(signature = (query=None, *, vector=None, vectors=None, hybrid=false, limit=10, tenant=None, filter=None, include_vectors=false))]
     #[allow(clippy::too_many_arguments)]
     fn search(
         &self,
@@ -630,6 +634,7 @@ impl Client {
         hybrid: bool,
         limit: usize,
         tenant: Option<String>,
+        filter: Option<String>,
         include_vectors: bool,
     ) -> PyResult<Vec<Hit>> {
         self.lifecycle.check_open()?;
@@ -645,6 +650,7 @@ impl Client {
             vectors,
             hybrid,
             limit,
+            filter,
             include_vectors,
         )
     }

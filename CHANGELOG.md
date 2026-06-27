@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `POST /ns/{namespace}/query` accepts an optional `filter` string, a DataFusion SQL predicate applied through LanceDB before vector ranking, full-text scoring, or hybrid fusion. Filtered vector queries return up to `k` neighbours satisfying the predicate rather than filtering an already-selected top-k. The field participates in the exact-cache key, malformed predicates return `400 InvalidRequest`, and `semantic_cache.enabled` rejects filtered requests in v1. The embedded Python package mirrors this with `search(filter=...)`. Part 1 of #84.
+
 ## [0.9.2] - 2026-06-19
 
 ### Added

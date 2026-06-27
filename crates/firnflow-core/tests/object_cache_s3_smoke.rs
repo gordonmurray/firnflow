@@ -148,12 +148,12 @@ async fn run_gates(
     let q = vec_for(42);
     let (g0, h0, ..) = metrics.snapshot();
     let cold = manager
-        .query(ns, q.clone(), None, 10, None, None, false)
+        .query(ns, q.clone(), None, 10, None, None, None, false)
         .await
         .map_err(|e| format!("cold query: {e}"))?;
     let (g1, h1, ..) = metrics.snapshot();
     let warm = manager
-        .query(ns, q.clone(), None, 10, None, None, false)
+        .query(ns, q.clone(), None, 10, None, None, None, false)
         .await
         .map_err(|e| format!("warm query: {e}"))?;
     let (g2, h2, ..) = metrics.snapshot();
@@ -201,7 +201,7 @@ async fn run_gates(
         .await
         .map_err(|e| format!("recreate upsert: {e}"))?;
     let after = manager
-        .query(ns, mvec, None, 1, None, None, false)
+        .query(ns, mvec, None, 1, None, None, None, false)
         .await
         .map_err(|e| format!("post-recreate query: {e}"))?;
     let top = after.results.first().map(|r| r.id);
@@ -225,7 +225,7 @@ async fn run_gates(
     let manager2 = NamespaceManager::new(root()?, opts.clone(), test_metrics())
         .with_object_cache_session(session2);
     manager2
-        .query(ns, vec_for(7), None, 1, None, None, false)
+        .query(ns, vec_for(7), None, 1, None, None, None, false)
         .await
         .map_err(|e| format!("post-restart query: {e}"))?;
     let payload_after = payload_bytes(cache_root);

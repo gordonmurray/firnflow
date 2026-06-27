@@ -982,6 +982,11 @@ impl NamespaceManager {
     /// `ingested_at_micros` but `vector: None`. The query vector is
     /// still used for search; only the response materialisation
     /// changes.
+    ///
+    /// `filter` is a DataFusion SQL predicate applied through
+    /// LanceDB's prefilter (`only_if`) before vector ranking or FTS
+    /// scoring. Malformed predicates are reported as
+    /// [`FirnflowError::InvalidRequest`].
     #[allow(clippy::too_many_arguments)]
     pub async fn query(
         &self,
@@ -991,6 +996,7 @@ impl NamespaceManager {
         k: usize,
         nprobes: Option<usize>,
         text: Option<String>,
+        filter: Option<String>,
         include_vector: bool,
     ) -> Result<QueryResultSet, FirnflowError> {
         let info = match self.resolve_schema_info(ns).await? {
@@ -1129,12 +1135,19 @@ impl NamespaceManager {
             if let Some(ref t) = text {
                 vq = vq.full_text_search(FullTextSearchQuery::new(t.clone()));
             }
+            if let Some(ref f) = filter {
+                vq = vq.only_if(f.clone());
+            }
             if let Some(ref cols) = projection {
                 vq = vq.select(Select::columns(cols));
             }
-            vq.execute()
-                .await
-                .map_err(|e| FirnflowError::Backend(format!("query.execute: {e}")))?
+            vq.execute().await.map_err(|e| {
+                if filter.is_some() {
+                    FirnflowError::InvalidRequest(format!("query filter: {e}"))
+                } else {
+                    FirnflowError::Backend(format!("query.execute: {e}"))
+                }
+            })?
         } else {
             // FTS-only
             let t = text.unwrap();
@@ -1142,12 +1155,19 @@ impl NamespaceManager {
                 .query()
                 .full_text_search(FullTextSearchQuery::new(t))
                 .limit(k);
+            if let Some(ref f) = filter {
+                q = q.only_if(f.clone());
+            }
             if let Some(ref cols) = projection {
                 q = q.select(Select::columns(cols));
             }
-            q.execute()
-                .await
-                .map_err(|e| FirnflowError::Backend(format!("fts.execute: {e}")))?
+            q.execute().await.map_err(|e| {
+                if filter.is_some() {
+                    FirnflowError::InvalidRequest(format!("query filter: {e}"))
+                } else {
+                    FirnflowError::Backend(format!("fts.execute: {e}"))
+                }
+            })?
         };
 
         let batches: Vec<RecordBatch> = stream

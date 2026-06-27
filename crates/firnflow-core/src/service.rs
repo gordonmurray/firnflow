@@ -281,7 +281,8 @@ impl NamespaceService {
         let semantic_eligible = semantic_opt.is_some()
             && !req.vector.is_empty()
             && req.vectors.as_ref().is_none_or(|v| v.is_empty())
-            && req.text.is_none();
+            && req.text.is_none()
+            && req.filter.is_none();
 
         if semantic_opt.is_some() && !semantic_eligible {
             // This branch is reachable today only if validation
@@ -352,6 +353,7 @@ impl NamespaceService {
                 req.k,
                 req.nprobes,
                 req.text.clone(),
+                req.filter.clone(),
                 req.include_vector,
             )
             .await?;
@@ -480,6 +482,7 @@ pub fn hash_query_for_cache(req: &QueryRequest) -> Result<QueryHash, FirnflowErr
         k: usize,
         nprobes: Option<usize>,
         text: &'a Option<String>,
+        filter: &'a Option<String>,
         // Deliberately in the key, unlike `semantic_cache`: a full
         // and a vector-light result set are different payloads and
         // must not collide on the same entry.
@@ -491,6 +494,7 @@ pub fn hash_query_for_cache(req: &QueryRequest) -> Result<QueryHash, FirnflowErr
         k: req.k,
         nprobes: req.nprobes,
         text: &req.text,
+        filter: &req.filter,
         include_vector: req.include_vector,
     };
     let bytes = bincode::serde::encode_to_vec(&canonical, config::standard())
@@ -523,5 +527,34 @@ fn classify_query_type(req: &QueryRequest) -> &'static str {
         (_, true, false) => "multivector",
         (false, false, true) => "fts",
         (false, false, false) => "vector",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req_with_filter(filter: Option<&str>) -> QueryRequest {
+        QueryRequest {
+            vector: vec![1.0, 0.0, 0.0],
+            vectors: None,
+            k: 10,
+            nprobes: None,
+            text: None,
+            filter: filter.map(str::to_string),
+            include_vector: true,
+            semantic_cache: None,
+        }
+    }
+
+    #[test]
+    fn filter_changes_cache_key() {
+        let unfiltered = hash_query_for_cache(&req_with_filter(None)).unwrap();
+        let lt = hash_query_for_cache(&req_with_filter(Some("id < 5"))).unwrap();
+        let gt = hash_query_for_cache(&req_with_filter(Some("id > 5"))).unwrap();
+
+        assert_ne!(unfiltered, lt);
+        assert_ne!(unfiltered, gt);
+        assert_ne!(lt, gt);
     }
 }

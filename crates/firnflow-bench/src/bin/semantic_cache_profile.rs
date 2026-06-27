@@ -387,6 +387,7 @@ fn vector_query(
         k,
         nprobes: Some(nprobes),
         text: None,
+        filter: None,
         include_vector: true,
         semantic_cache: semantic_threshold.map(|threshold| SemanticCacheRequest {
             enabled: true,
@@ -422,7 +423,7 @@ async fn true_query(
     cfg: &BenchConfig,
 ) -> anyhow::Result<QueryResultSet> {
     manager
-        .query(ns, vector, None, cfg.k, Some(cfg.nprobes), None, true)
+        .query(ns, vector, None, cfg.k, Some(cfg.nprobes), None, None, true)
         .await
         .map_err(|e| anyhow::anyhow!("manager query: {e}"))
 }

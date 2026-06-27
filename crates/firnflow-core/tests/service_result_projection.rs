@@ -91,6 +91,7 @@ fn request(vector: Vec<f32>, include_vector: bool) -> QueryRequest {
         k: 10,
         nprobes: None,
         text: None,
+        filter: None,
         include_vector,
         semantic_cache: None,
     }

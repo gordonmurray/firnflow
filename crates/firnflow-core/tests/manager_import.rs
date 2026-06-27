@@ -176,7 +176,7 @@ async fn import_single_vector_is_queryable() {
     let mut q = vec![0.0_f32; DIM];
     q[0] = 1.0;
     let results = mgr
-        .query(&ns, q, None, 10, None, None, true)
+        .query(&ns, q, None, 10, None, None, None, true)
         .await
         .expect("query")
         .results;

@@ -253,6 +253,7 @@ curl -X POST http://localhost:3000/ns/demo/import \
             <tr><td><code>k</code></td><td>integer</td><td>Yes</td><td>Number of results to return</td></tr>
             <tr><td><code>nprobes</code></td><td>integer</td><td>No</td><td>IVF partitions to probe (default 20). Higher values trade latency for recall.</td></tr>
             <tr><td><code>text</code></td><td>string</td><td>No*</td><td>Text query for full-text or hybrid search</td></tr>
+            <tr><td><code>filter</code></td><td>string</td><td>No</td><td>DataFusion SQL predicate applied before vector ranking or FTS scoring. Uses the same predicate dialect as <code>/list</code>; examples include <code>id &gt; 1000</code> and predicates over <code>_ingested_at</code>. For vector search this is a prefilter: the response contains up to <code>k</code> neighbours satisfying the predicate, not a post-filtered top-k. Malformed predicates return 400.</td></tr>
             <tr><td><code>include_vector</code></td><td>bool</td><td>No</td><td>Whether result rows carry the stored vector (default <code>true</code>). Set <code>false</code> when you only need <code>id</code>/<code>score</code>/<code>text</code> — the vector column is dropped from the returned rows, so the response and the cached result shrink, and the object-storage read for those rows' vectors is avoided. At dim=1536 each hit carries ~6&nbsp;KiB of raw vector data, so a 100-hit response drops by roughly 600&nbsp;KiB. This is response projection, not a scan optimisation: Lance still reads whatever it needs to score the query, so an unindexed flat scan reads the vectors regardless.</td></tr>
             <tr><td><code>semantic_cache</code></td><td>object</td><td>No</td><td>Opt-in semantic-cache controls. See <em>Semantic cache</em> below. Omitting the field preserves the legacy exact-cache-only behaviour.</td></tr>
           </tbody>
@@ -260,7 +261,7 @@ curl -X POST http://localhost:3000/ns/demo/import \
         <p><small>* At least one of <code>vector</code>, <code>vectors</code>, or <code>text</code> must be present. Setting both <code>vector</code> and <code>vectors</code> on the same request returns 400.</small></p>
 
         <h4>Semantic cache</h4>
-        <p>An optional <code>semantic_cache</code> block lets the server reuse a previous query's result when the new query vector is very close to a recent one against the same namespace generation. The exact result cache is still consulted first; only when it misses does the semantic layer get a chance to short-circuit. Eligible requests are single-vector only in v1; multivector, FTS, and hybrid requests with the field enabled return 400.</p>
+        <p>An optional <code>semantic_cache</code> block lets the server reuse a previous query's result when the new query vector is very close to a recent one against the same namespace generation. The exact result cache is still consulted first; only when it misses does the semantic layer get a chance to short-circuit. Eligible requests are single-vector only in v1; multivector, FTS, hybrid, and filtered requests with the field enabled return 400.</p>
         <table>
           <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
           <tbody>

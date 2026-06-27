@@ -56,6 +56,13 @@ pub struct QueryRequest {
     /// When set without any vector field, triggers FTS-only search.
     #[serde(default)]
     pub text: Option<String>,
+    /// Optional DataFusion SQL predicate, using the same dialect as
+    /// `/list` filters. LanceDB applies this as a prefilter before
+    /// nearest-neighbour search, so vector queries return up to `k`
+    /// neighbours satisfying the predicate rather than filtering an
+    /// already-selected top-k.
+    #[serde(default)]
+    pub filter: Option<String>,
     /// Whether result rows carry the stored vector. Defaults to
     /// `true`, preserving the existing response shape. `false` asks
     /// the backend not to materialise or return the stored vector
@@ -128,9 +135,9 @@ pub const DEFAULT_SEMANTIC_MIN_SIMILARITY: f32 = 0.995;
 /// Checks:
 /// - `min_similarity ∈ (0.0, 1.0]` when supplied.
 /// - When `enabled: true`, the request must be single-vector
-///   (`vector` non-empty, `vectors` absent, `text` absent). V1 does
-///   not support semantic caching for FTS, hybrid, or multivector
-///   queries — those reject with a clear 400.
+///   (`vector` non-empty, `vectors` absent, `text` and `filter`
+///   absent). V1 does not support semantic caching for FTS, hybrid,
+///   filtered, or multivector queries — those reject with a clear 400.
 pub fn validate_semantic_cache_request(req: &QueryRequest) -> Result<(), crate::FirnflowError> {
     let Some(sem) = req.semantic_cache.as_ref() else {
         return Ok(());
@@ -160,6 +167,11 @@ pub fn validate_semantic_cache_request(req: &QueryRequest) -> Result<(), crate::
     if req.text.is_some() {
         return Err(crate::FirnflowError::InvalidRequest(
             "semantic_cache is not supported for FTS or hybrid queries in v1".into(),
+        ));
+    }
+    if req.filter.is_some() {
+        return Err(crate::FirnflowError::InvalidRequest(
+            "semantic_cache is not supported for filtered queries in v1".into(),
         ));
     }
     Ok(())
@@ -290,6 +302,7 @@ mod tests {
             k: 10,
             nprobes: None,
             text: None,
+            filter: None,
             include_vector: true,
             semantic_cache: None,
         }
@@ -386,6 +399,24 @@ mod tests {
         let err = validate_semantic_cache_request(&req).unwrap_err();
         match err {
             FirnflowError::InvalidRequest(msg) => assert!(msg.contains("single-vector"), "{msg}"),
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn semantic_cache_rejects_filter() {
+        let mut req = req_vector_only();
+        req.filter = Some("id < 5".into());
+        req.semantic_cache = Some(SemanticCacheRequest {
+            enabled: true,
+            min_similarity: None,
+        });
+
+        let err = validate_semantic_cache_request(&req).unwrap_err();
+        match err {
+            FirnflowError::InvalidRequest(msg) => {
+                assert!(msg.contains("filter"), "{msg}");
+            }
             other => panic!("expected InvalidRequest, got {other:?}"),
         }
     }

@@ -470,7 +470,7 @@ async fn query_via_manager(
     // projection knob (the stored vectors were always read back), so
     // these numbers stay comparable to the published cold/warm framing.
     manager
-        .query(ns, vector, None, k, Some(nprobes), None, true)
+        .query(ns, vector, None, k, Some(nprobes), None, None, true)
         .await
         .map_err(|e| anyhow::anyhow!("query: {e}"))?;
     Ok(start.elapsed())

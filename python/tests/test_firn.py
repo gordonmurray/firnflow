@@ -49,6 +49,18 @@ def test_include_vectors(db):
     assert got.vector == [1.0, 0.0, 0.0, 0.0]
 
 
+def test_search_filter(db):
+    db.add(
+        [
+            {"id": 1, "vector": [1.0, 0.0, 0.0, 0.0], "text": "x"},
+            {"id": 2, "vector": [0.0, 1.0, 0.0, 0.0], "text": "x"},
+            {"id": 3, "vector": [0.0, 0.0, 1.0, 0.0], "text": "x"},
+        ]
+    )
+    hits = db.search(vector=[1.0, 0.0, 0.0, 0.0], limit=3, filter="id > 1")
+    assert [h.id for h in hits] == [2, 3]
+
+
 def test_tenant_isolation(db):
     db.add([{"id": 10, "vector": [1.0, 0.0, 0.0, 0.0], "text": "a"}], tenant="acme")
     db.add([{"id": 20, "vector": [1.0, 0.0, 0.0, 0.0], "text": "b"}], tenant="globex")
