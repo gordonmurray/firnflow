@@ -5,6 +5,8 @@
 //! serde derives and are what the axum handlers parse straight from
 //! request bodies.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 /// Default number of IVF partitions to probe per query when an
@@ -56,6 +58,13 @@ pub struct QueryRequest {
     /// When set without any vector field, triggers FTS-only search.
     #[serde(default)]
     pub text: Option<String>,
+    /// Optional DataFusion SQL predicate, using the same dialect as
+    /// `/list` filters. LanceDB applies this as a prefilter before
+    /// nearest-neighbour search, so vector queries return up to `k`
+    /// neighbours satisfying the predicate rather than filtering an
+    /// already-selected top-k.
+    #[serde(default)]
+    pub filter: Option<String>,
     /// Whether result rows carry the stored vector. Defaults to
     /// `true`, preserving the existing response shape. `false` asks
     /// the backend not to materialise or return the stored vector
@@ -79,6 +88,54 @@ pub struct QueryRequest {
     /// does not split otherwise-identical entries.
     #[serde(default)]
     pub semantic_cache: Option<SemanticCacheRequest>,
+}
+
+/// Request payload for `POST /ns/{namespace}/facet`.
+///
+/// Facets are computed over the whole set matching `filter`, not over
+/// a vector query's returned top-k. The filter dialect is the same
+/// DataFusion SQL predicate accepted by `/query` and `/list`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FacetRequest {
+    /// Optional DataFusion SQL predicate.
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Scalar fields to aggregate.
+    pub fields: Vec<String>,
+    /// Maximum buckets to return per field. Defaults at the service
+    /// boundary when omitted.
+    #[serde(default)]
+    pub top: Option<usize>,
+}
+
+/// Default bucket cap for facets.
+pub const DEFAULT_FACET_TOP: usize = 100;
+/// Maximum bucket cap accepted by the facet endpoint.
+pub const MAX_FACET_TOP: usize = 1000;
+
+/// Pure shape validation for a facet request. Column existence and
+/// facetable-ness are checked by the manager against the live schema.
+pub fn validate_facet_request(req: &FacetRequest) -> Result<usize, crate::FirnflowError> {
+    if req.fields.is_empty() {
+        return Err(crate::FirnflowError::InvalidRequest(
+            "facet fields must not be empty".into(),
+        ));
+    }
+    let mut seen = HashSet::with_capacity(req.fields.len());
+    for field in &req.fields {
+        if !seen.insert(field) {
+            return Err(crate::FirnflowError::InvalidRequest(format!(
+                "duplicate facet field '{field}'"
+            )));
+        }
+    }
+    let top = req.top.unwrap_or(DEFAULT_FACET_TOP);
+    if top == 0 || top > MAX_FACET_TOP {
+        return Err(crate::FirnflowError::InvalidRequest(format!(
+            "facet top must be in 1..={MAX_FACET_TOP}, got {top}"
+        )));
+    }
+    Ok(top)
 }
 
 /// Per-request controls for opt-in semantic caching.
@@ -128,9 +185,9 @@ pub const DEFAULT_SEMANTIC_MIN_SIMILARITY: f32 = 0.995;
 /// Checks:
 /// - `min_similarity ∈ (0.0, 1.0]` when supplied.
 /// - When `enabled: true`, the request must be single-vector
-///   (`vector` non-empty, `vectors` absent, `text` absent). V1 does
-///   not support semantic caching for FTS, hybrid, or multivector
-///   queries — those reject with a clear 400.
+///   (`vector` non-empty, `vectors` absent, `text` and `filter`
+///   absent). V1 does not support semantic caching for FTS, hybrid,
+///   filtered, or multivector queries — those reject with a clear 400.
 pub fn validate_semantic_cache_request(req: &QueryRequest) -> Result<(), crate::FirnflowError> {
     let Some(sem) = req.semantic_cache.as_ref() else {
         return Ok(());
@@ -160,6 +217,11 @@ pub fn validate_semantic_cache_request(req: &QueryRequest) -> Result<(), crate::
     if req.text.is_some() {
         return Err(crate::FirnflowError::InvalidRequest(
             "semantic_cache is not supported for FTS or hybrid queries in v1".into(),
+        ));
+    }
+    if req.filter.is_some() {
+        return Err(crate::FirnflowError::InvalidRequest(
+            "semantic_cache is not supported for filtered queries in v1".into(),
         ));
     }
     Ok(())
@@ -290,6 +352,7 @@ mod tests {
             k: 10,
             nprobes: None,
             text: None,
+            filter: None,
             include_vector: true,
             semantic_cache: None,
         }
@@ -388,5 +451,53 @@ mod tests {
             FirnflowError::InvalidRequest(msg) => assert!(msg.contains("single-vector"), "{msg}"),
             other => panic!("expected InvalidRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn semantic_cache_rejects_filter() {
+        let mut req = req_vector_only();
+        req.filter = Some("id < 5".into());
+        req.semantic_cache = Some(SemanticCacheRequest {
+            enabled: true,
+            min_similarity: None,
+        });
+
+        let err = validate_semantic_cache_request(&req).unwrap_err();
+        match err {
+            FirnflowError::InvalidRequest(msg) => {
+                assert!(msg.contains("filter"), "{msg}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn facet_request_validation() {
+        let mut req = FacetRequest {
+            filter: None,
+            fields: vec!["section".into()],
+            top: None,
+        };
+        assert_eq!(validate_facet_request(&req).unwrap(), DEFAULT_FACET_TOP);
+
+        req.fields.clear();
+        assert!(matches!(
+            validate_facet_request(&req),
+            Err(FirnflowError::InvalidRequest(_))
+        ));
+
+        req.fields.push("section".into());
+        req.top = Some(0);
+        assert!(matches!(
+            validate_facet_request(&req),
+            Err(FirnflowError::InvalidRequest(_))
+        ));
+
+        req.top = Some(10);
+        req.fields.push("section".into());
+        assert!(matches!(
+            validate_facet_request(&req),
+            Err(FirnflowError::InvalidRequest(_))
+        ));
     }
 }

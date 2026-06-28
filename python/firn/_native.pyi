@@ -29,8 +29,17 @@ class Collection:
         hybrid: bool = False,
         limit: int = 10,
         tenant: Optional[str] = None,
+        filter: Optional[str] = None,
         include_vectors: bool = False,
     ) -> list[Hit]: ...
+    def facet(
+        self,
+        fields: list[str],
+        *,
+        tenant: Optional[str] = None,
+        filter: Optional[str] = None,
+        top: Optional[int] = None,
+    ) -> dict[str, list[dict]]: ...
 
 class Client:
     """An embedded firn client over a default collection."""
@@ -50,8 +59,17 @@ class Client:
         hybrid: bool = False,
         limit: int = 10,
         tenant: Optional[str] = None,
+        filter: Optional[str] = None,
         include_vectors: bool = False,
     ) -> list[Hit]: ...
+    def facet(
+        self,
+        fields: list[str],
+        *,
+        tenant: Optional[str] = None,
+        filter: Optional[str] = None,
+        top: Optional[int] = None,
+    ) -> dict[str, list[dict]]: ...
     def close(self) -> None: ...
     def __enter__(self) -> "Client": ...
     def __exit__(self, *exc: object) -> bool: ...

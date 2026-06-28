@@ -322,6 +322,7 @@ async fn main() -> anyhow::Result<()> {
             k: 10,
             nprobes: None,
             text: None,
+            filter: None,
             include_vector: true,
             semantic_cache: None,
         })
@@ -334,6 +335,7 @@ async fn main() -> anyhow::Result<()> {
             k: 10,
             nprobes: Some(cfg.nprobes),
             text: None,
+            filter: None,
             include_vector: true,
             semantic_cache: None,
         })

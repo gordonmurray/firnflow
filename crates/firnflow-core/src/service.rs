@@ -26,9 +26,10 @@ use crate::cache::{NamespaceCache, QueryHash, SemanticCache, SemanticLookup};
 use crate::manager::{CompactResult, NamespaceManager, UpsertRow};
 use crate::metrics::CoreMetrics;
 use crate::query::{
-    effective_semantic_threshold, validate_semantic_cache_request, QueryRequest, DEFAULT_NPROBES,
+    effective_semantic_threshold, validate_facet_request, validate_semantic_cache_request,
+    FacetRequest, QueryRequest, DEFAULT_NPROBES,
 };
-use crate::{FirnflowError, NamespaceId, QueryResultSet};
+use crate::{FacetResultSet, FirnflowError, NamespaceId, QueryResultSet};
 
 /// Where a query result came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,7 +282,8 @@ impl NamespaceService {
         let semantic_eligible = semantic_opt.is_some()
             && !req.vector.is_empty()
             && req.vectors.as_ref().is_none_or(|v| v.is_empty())
-            && req.text.is_none();
+            && req.text.is_none()
+            && req.filter.is_none();
 
         if semantic_opt.is_some() && !semantic_eligible {
             // This branch is reachable today only if validation
@@ -352,6 +354,7 @@ impl NamespaceService {
                 req.k,
                 req.nprobes,
                 req.text.clone(),
+                req.filter.clone(),
                 req.include_vector,
             )
             .await?;
@@ -376,6 +379,43 @@ impl NamespaceService {
             result,
             cache_source: QueryCacheSource::Backend,
         })
+    }
+
+    /// Compute facet counts through the exact cache.
+    pub async fn facet(
+        &self,
+        ns: &NamespaceId,
+        req: &FacetRequest,
+    ) -> Result<FacetResultSet, FirnflowError> {
+        let top = validate_facet_request(req)?;
+        let mut fields = req.fields.clone();
+        fields.sort();
+        let hash = hash_facet_for_cache(req.filter.as_ref(), &fields, top)?;
+        let generation = self.manager.generation(ns).await?;
+        self.cache.set_generation(ns, generation);
+        let (hit, captured_generation) = self.cache.try_get(ns, hash).await;
+        if let Some(bytes) = hit {
+            match decode_facet_payload(&bytes) {
+                Ok(decoded) => return Ok(decoded),
+                Err(e) => {
+                    tracing::warn!(
+                        namespace = %ns,
+                        error = %e,
+                        "cached facet payload failed to decode; treating as a miss"
+                    );
+                }
+            }
+        }
+
+        self.metrics.record_s3_request(ns, "facet");
+        let result = self
+            .manager
+            .facet(ns, req.filter.clone(), &fields, top)
+            .await?;
+        let bytes = encode_facet_payload(&result)?;
+        self.cache
+            .populate_with_generation(ns, captured_generation, hash, bytes);
+        Ok(result)
     }
 
     /// Build an IVF_PQ index on the namespace's vector column.
@@ -480,6 +520,7 @@ pub fn hash_query_for_cache(req: &QueryRequest) -> Result<QueryHash, FirnflowErr
         k: usize,
         nprobes: Option<usize>,
         text: &'a Option<String>,
+        filter: &'a Option<String>,
         // Deliberately in the key, unlike `semantic_cache`: a full
         // and a vector-light result set are different payloads and
         // must not collide on the same entry.
@@ -491,10 +532,36 @@ pub fn hash_query_for_cache(req: &QueryRequest) -> Result<QueryHash, FirnflowErr
         k: req.k,
         nprobes: req.nprobes,
         text: &req.text,
+        filter: &req.filter,
         include_vector: req.include_vector,
     };
     let bytes = bincode::serde::encode_to_vec(&canonical, config::standard())
         .map_err(|e| FirnflowError::Backend(format!("encode query: {e}")))?;
+    Ok(QueryHash::of(&bytes))
+}
+
+#[doc(hidden)]
+/// Hash cacheable facet fields.
+pub fn hash_facet_for_cache(
+    filter: Option<&String>,
+    sorted_fields: &[String],
+    top: usize,
+) -> Result<QueryHash, FirnflowError> {
+    #[derive(Serialize)]
+    struct Canonical<'a> {
+        kind: &'static str,
+        filter: Option<&'a String>,
+        fields: &'a [String],
+        top: usize,
+    }
+    let canonical = Canonical {
+        kind: "facet",
+        filter,
+        fields: sorted_fields,
+        top,
+    };
+    let bytes = bincode::serde::encode_to_vec(&canonical, config::standard())
+        .map_err(|e| FirnflowError::Backend(format!("encode facet key: {e}")))?;
     Ok(QueryHash::of(&bytes))
 }
 
@@ -507,6 +574,18 @@ fn decode_payload(bytes: &[u8]) -> Result<QueryResultSet, FirnflowError> {
     let (decoded, _): (QueryResultSet, usize) =
         bincode::serde::decode_from_slice(bytes, config::standard())
             .map_err(|e| FirnflowError::Backend(format!("decode result: {e}")))?;
+    Ok(decoded)
+}
+
+fn encode_facet_payload(result: &FacetResultSet) -> Result<Vec<u8>, FirnflowError> {
+    bincode::serde::encode_to_vec(result, config::standard())
+        .map_err(|e| FirnflowError::Backend(format!("encode facet result: {e}")))
+}
+
+fn decode_facet_payload(bytes: &[u8]) -> Result<FacetResultSet, FirnflowError> {
+    let (decoded, _): (FacetResultSet, usize) =
+        bincode::serde::decode_from_slice(bytes, config::standard())
+            .map_err(|e| FirnflowError::Backend(format!("decode facet result: {e}")))?;
     Ok(decoded)
 }
 
@@ -523,5 +602,34 @@ fn classify_query_type(req: &QueryRequest) -> &'static str {
         (_, true, false) => "multivector",
         (false, false, true) => "fts",
         (false, false, false) => "vector",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req_with_filter(filter: Option<&str>) -> QueryRequest {
+        QueryRequest {
+            vector: vec![1.0, 0.0, 0.0],
+            vectors: None,
+            k: 10,
+            nprobes: None,
+            text: None,
+            filter: filter.map(str::to_string),
+            include_vector: true,
+            semantic_cache: None,
+        }
+    }
+
+    #[test]
+    fn filter_changes_cache_key() {
+        let unfiltered = hash_query_for_cache(&req_with_filter(None)).unwrap();
+        let lt = hash_query_for_cache(&req_with_filter(Some("id < 5"))).unwrap();
+        let gt = hash_query_for_cache(&req_with_filter(Some("id > 5"))).unwrap();
+
+        assert_ne!(unfiltered, lt);
+        assert_ne!(unfiltered, gt);
+        assert_ne!(lt, gt);
     }
 }

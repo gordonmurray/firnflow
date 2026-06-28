@@ -85,6 +85,7 @@ fn row(id: u64, vector: Vec<f32>, text: &str) -> UpsertRow {
         vector,
         vectors: None,
         text: Some(text.to_string()),
+        attributes: serde_json::Map::new(),
     }
 }
 
@@ -127,7 +128,7 @@ async fn reupsert_replaces_single_vector_row() {
     // the new vector; id=1 is the top hit, carries the new text, and
     // appears exactly once.
     let results = manager
-        .query(&ns, unit_vector(2), None, 10, None, None, true)
+        .query(&ns, unit_vector(2), None, 10, None, None, None, true)
         .await
         .expect("query")
         .results;
@@ -236,6 +237,7 @@ async fn multivector_reupsert_replaces_not_appends() {
         vector: Vec::new(),
         vectors: Some(bag),
         text: None,
+        attributes: serde_json::Map::new(),
     };
 
     manager
@@ -275,6 +277,7 @@ async fn multivector_reupsert_replaces_not_appends() {
             Vec::new(),
             Some(vec![unit_vector(2)]),
             10,
+            None,
             None,
             None,
             true,

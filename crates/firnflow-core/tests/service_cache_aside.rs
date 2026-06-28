@@ -115,6 +115,7 @@ async fn service_cache_aside_follows_table_version() {
         k: 10,
         nprobes: None,
         text: None,
+        filter: None,
         include_vector: true,
         semantic_cache: None,
     };
@@ -243,6 +244,7 @@ async fn delete_recreate_does_not_serve_old_incarnation() {
         k: 10,
         nprobes: None,
         text: None,
+        filter: None,
         include_vector: true,
         semantic_cache: None,
     };

@@ -33,15 +33,19 @@
 //! through the cached handle and its result is visible to subsequent
 //! reads on that same handle.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use arrow_array::builder::{FixedSizeListBuilder, Float32Builder, ListBuilder, StringBuilder};
+use arrow_array::builder::{
+    BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder, Int64Builder,
+    ListBuilder, StringBuilder,
+};
 use arrow_array::{
-    new_null_array, Array, ArrayRef, FixedSizeListArray, Float32Array, ListArray, RecordBatch,
-    RecordBatchIterator, RecordBatchReader, StringArray, TimestampMicrosecondArray, UInt64Array,
+    new_null_array, Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
+    Int64Array, ListArray, RecordBatch, RecordBatchIterator, RecordBatchReader, StringArray,
+    TimestampMicrosecondArray, UInt64Array,
 };
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef, TimeUnit};
 use dashmap::DashMap;
@@ -52,7 +56,7 @@ use lancedb::index::scalar::{BTreeIndexBuilder, FtsIndexBuilder, FullTextSearchQ
 use lancedb::index::vector::IvfPqIndexBuilder;
 use lancedb::index::{Index, IndexType};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
-use lancedb::table::{OptimizeAction, WriteOptions};
+use lancedb::table::{NewColumnTransform, OptimizeAction, WriteOptions};
 use lancedb::DistanceType;
 use object_store::aws::AmazonS3Builder;
 use object_store::gcp::GoogleCloudStorageBuilder;
@@ -63,7 +67,9 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use crate::metrics::CoreMetrics;
 use crate::query::DEFAULT_NPROBES;
-use crate::result::{ListOrder, ListPage, ListRow, NamespaceInfo};
+use crate::result::{
+    FacetBucket, FacetField, FacetResultSet, ListOrder, ListPage, ListRow, NamespaceInfo,
+};
 use crate::storage_root::Scheme;
 use crate::vector::VectorKind;
 use crate::{FirnflowError, NamespaceId, QueryResult, QueryResultSet, StorageRoot};
@@ -95,6 +101,17 @@ pub const LIST_MAX_LIMIT: usize = 500;
 /// actually uses; future user-column ordering work extends this slice.
 const SCALAR_INDEX_COLUMNS: &[&str] = &["id", INGESTED_AT_COLUMN];
 
+const RESERVED_ATTRIBUTE_COLUMNS: &[&str] = &[
+    "id",
+    "vector",
+    "vectors",
+    "text",
+    INGESTED_AT_COLUMN,
+    DISTANCE_COLUMN,
+    SCORE_COLUMN,
+    RELEVANCE_COLUMN,
+];
+
 /// Validate that `column` is one the scalar-index path will build a
 /// BTree on, returning [`FirnflowError::InvalidRequest`] otherwise.
 ///
@@ -113,12 +130,192 @@ pub fn validate_scalar_index_column(column: &str) -> Result<(), FirnflowError> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Attribute column types accepted by JSON upsert, Arrow import,
+/// filters, and facets. The first four are scalars; [`StringList`] is
+/// a variable-length list of strings (e.g. tags/genres) — filterable
+/// with `array_has(col, 'value')` and faceted per element.
+///
+/// [`StringList`]: AttributeType::StringList
+pub enum AttributeType {
+    /// Signed 64-bit integer attribute.
+    Int64,
+    /// 64-bit floating point attribute.
+    Float64,
+    /// Boolean attribute.
+    Boolean,
+    /// UTF-8 string attribute.
+    Utf8,
+    /// Variable-length list of UTF-8 strings (`List<Utf8>`). Multi-valued:
+    /// `array_has(col, 'v')` filters it and a facet counts each element.
+    StringList,
+}
+
+impl AttributeType {
+    fn arrow(self) -> DataType {
+        match self {
+            Self::Int64 => DataType::Int64,
+            Self::Float64 => DataType::Float64,
+            Self::Boolean => DataType::Boolean,
+            Self::Utf8 => DataType::Utf8,
+            // Item field "item", nullable — matches arrow's ListBuilder
+            // default so the built array's type equals the table schema.
+            Self::StringList => DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+        }
+    }
+
+    fn from_arrow(dt: &DataType) -> Option<Self> {
+        match dt {
+            DataType::Int64 => Some(Self::Int64),
+            DataType::Float64 => Some(Self::Float64),
+            DataType::Boolean => Some(Self::Boolean),
+            DataType::Utf8 => Some(Self::Utf8),
+            DataType::List(item) if *item.data_type() == DataType::Utf8 => Some(Self::StringList),
+            _ => None,
+        }
+    }
+
+    fn sql_null_cast(self) -> &'static str {
+        match self {
+            Self::Int64 => "CAST(NULL AS BIGINT)",
+            Self::Float64 => "CAST(NULL AS DOUBLE)",
+            Self::Boolean => "CAST(NULL AS BOOLEAN)",
+            Self::Utf8 => "CAST(NULL AS VARCHAR)",
+            // Backfill an all-null list column on an existing table.
+            Self::StringList => "arrow_cast(NULL, 'List(Utf8)')",
+        }
+    }
+}
+
+fn validate_attribute_name(name: &str) -> Result<(), FirnflowError> {
+    if RESERVED_ATTRIBUTE_COLUMNS.contains(&name) || name.starts_with('_') {
+        return Err(FirnflowError::InvalidRequest(format!(
+            "attribute name {name:?} is reserved"
+        )));
+    }
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => {
+            return Err(FirnflowError::InvalidRequest(format!(
+                "attribute name {name:?} must start with an ASCII letter"
+            )));
+        }
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(FirnflowError::InvalidRequest(format!(
+            "attribute name {name:?} must contain only ASCII letters, digits, and underscores"
+        )));
+    }
+    Ok(())
+}
+
+fn infer_attribute_type(value: &serde_json::Value) -> Result<Option<AttributeType>, FirnflowError> {
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Bool(_) => Ok(Some(AttributeType::Boolean)),
+        serde_json::Value::String(_) => Ok(Some(AttributeType::Utf8)),
+        serde_json::Value::Number(n) => {
+            if n.is_i64() || n.is_u64() {
+                Ok(Some(AttributeType::Int64))
+            } else {
+                Ok(Some(AttributeType::Float64))
+            }
+        }
+        serde_json::Value::Array(items) => {
+            // A list attribute. An empty list carries no type signal, so it
+            // is treated like null (no column created from it alone); a later
+            // non-empty list in the request/namespace fixes the type.
+            if items.is_empty() {
+                Ok(None)
+            } else if items.iter().all(serde_json::Value::is_string) {
+                Ok(Some(AttributeType::StringList))
+            } else {
+                Err(FirnflowError::InvalidRequest(
+                    "list attributes must contain only strings".into(),
+                ))
+            }
+        }
+        _ => Err(FirnflowError::InvalidRequest(
+            "attributes must be JSON scalars, a list of strings, or null".into(),
+        )),
+    }
+}
+
+fn infer_request_attributes(
+    rows: &[UpsertRow],
+) -> Result<BTreeMap<String, AttributeType>, FirnflowError> {
+    let mut out = BTreeMap::new();
+    for row in rows {
+        for (name, value) in &row.attributes {
+            validate_attribute_name(name)?;
+            let Some(ty) = infer_attribute_type(value)? else {
+                continue;
+            };
+            match out.get(name) {
+                Some(existing) if *existing != ty => {
+                    return Err(FirnflowError::InvalidRequest(format!(
+                        "attribute {name:?} has conflicting types in request: \
+                         {:?} and {:?}",
+                        existing, ty
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    out.insert(name.clone(), ty);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn reconcile_attribute_schema(
+    info: &mut NamespaceSchemaInfo,
+    request: &BTreeMap<String, AttributeType>,
+) -> Result<BTreeMap<String, AttributeType>, FirnflowError> {
+    let mut added = BTreeMap::new();
+    for (name, ty) in request {
+        match info.attributes.get(name) {
+            Some(existing) if existing != ty => {
+                return Err(FirnflowError::InvalidRequest(format!(
+                    "attribute {name:?} is {:?} in this namespace, got {:?}",
+                    existing, ty
+                )));
+            }
+            Some(_) => {}
+            None => {
+                info.attributes.insert(name.clone(), *ty);
+                added.insert(name.clone(), *ty);
+            }
+        }
+    }
+    Ok(added)
+}
+
+async fn add_null_attribute_columns(
+    tbl: &lancedb::Table,
+    attributes: &BTreeMap<String, AttributeType>,
+) -> Result<(), FirnflowError> {
+    if attributes.is_empty() {
+        return Ok(());
+    }
+    let transforms: Vec<(String, String)> = attributes
+        .iter()
+        .map(|(name, ty)| (name.clone(), ty.sql_null_cast().to_string()))
+        .collect();
+    tbl.add_columns(NewColumnTransform::SqlExpressions(transforms), None)
+        .await
+        .map_err(|e| FirnflowError::Backend(format!("add attribute columns: {e}")))?;
+    Ok(())
+}
+
 /// Per-namespace schema facts cached after the first table open.
 /// The resolved vector dimension, the kind of vector representation
 /// (single vs multivector), and whether the table carries the
 /// `_ingested_at` system column all come from the same schema read
 /// and are stored together.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct NamespaceSchemaInfo {
     /// For [`VectorKind::Single`] this is the vector dimension. For
     /// [`VectorKind::Multivector`] this is the inner sub-vector
@@ -126,6 +323,7 @@ struct NamespaceSchemaInfo {
     dim: usize,
     kind: VectorKind,
     has_ingested_at: bool,
+    attributes: BTreeMap<String, AttributeType>,
 }
 
 /// A single row for upsert into a namespace.
@@ -155,6 +353,8 @@ pub struct UpsertRow {
     pub vectors: Option<Vec<Vec<f32>>>,
     /// Optional text payload for BM25 full-text search.
     pub text: Option<String>,
+    /// User-defined scalar attributes.
+    pub attributes: serde_json::Map<String, serde_json::Value>,
 }
 
 impl From<(u64, Vec<f32>)> for UpsertRow {
@@ -164,6 +364,7 @@ impl From<(u64, Vec<f32>)> for UpsertRow {
             vector,
             vectors: None,
             text: None,
+            attributes: serde_json::Map::new(),
         }
     }
 }
@@ -386,7 +587,12 @@ impl NamespaceManager {
     /// `_ingested_at` system column is included. Fresh namespaces
     /// always use `true`; appends into pre-existing tables pass
     /// whatever the live table schema reports so the batch matches.
-    fn schema_for_kind(kind: VectorKind, dim: usize, with_ingested_at: bool) -> Arc<Schema> {
+    fn schema_for_kind(
+        kind: VectorKind,
+        dim: usize,
+        with_ingested_at: bool,
+        attributes: &BTreeMap<String, AttributeType>,
+    ) -> Arc<Schema> {
         let inner_item = Arc::new(Field::new("item", DataType::Float32, true));
         let vector_type = match kind {
             VectorKind::Single => DataType::FixedSizeList(inner_item, dim as i32),
@@ -406,6 +612,9 @@ impl NamespaceManager {
                 DataType::Timestamp(TimeUnit::Microsecond, None),
                 false,
             ));
+        }
+        for (name, ty) in attributes {
+            fields.push(Field::new(name, ty.arrow(), true));
         }
         Arc::new(Schema::new(fields))
     }
@@ -470,6 +679,7 @@ impl NamespaceManager {
         ns: &NamespaceId,
         kind: VectorKind,
         dim: usize,
+        attributes: &BTreeMap<String, AttributeType>,
     ) -> Result<lancedb::Table, FirnflowError> {
         if let Some(entry) = self.handles.get(ns) {
             return Ok(entry.table.clone());
@@ -481,7 +691,7 @@ impl NamespaceManager {
             Err(_) => {
                 // Fresh namespace: always create with the current
                 // schema, which includes `_ingested_at`.
-                let schema = Self::schema_for_kind(kind, dim, true);
+                let schema = Self::schema_for_kind(kind, dim, true, attributes);
                 let empty = rows_to_batch(&schema, kind, dim, Vec::new(), true)?;
                 let reader: Box<dyn RecordBatchReader + Send> =
                     Box::new(RecordBatchIterator::new(vec![Ok(empty)], schema));
@@ -538,10 +748,10 @@ impl NamespaceManager {
         ns: &NamespaceId,
     ) -> Result<Option<NamespaceSchemaInfo>, FirnflowError> {
         if let Some(info) = self.schema_info.get(ns) {
-            return Ok(Some(*info));
+            return Ok(Some(info.clone()));
         }
         if let Some((_tbl, info)) = self.open_existing(ns).await? {
-            self.schema_info.insert(ns.clone(), info);
+            self.schema_info.insert(ns.clone(), info.clone());
             return Ok(Some(info));
         }
         Ok(None)
@@ -607,7 +817,8 @@ impl NamespaceManager {
         // means the table does not exist yet, so this call creates it
         // — the one moment we build the `id` index, while it is empty
         // or near-empty.
-        let (info, is_fresh) = match self.resolve_schema_info(ns).await? {
+        let request_attributes = infer_request_attributes(&rows)?;
+        let (mut info, is_fresh) = match self.resolve_schema_info(ns).await? {
             Some(info) => (info, false),
             None => {
                 let (kind, dim) = inspect_row_payload(&rows[0])?;
@@ -616,11 +827,13 @@ impl NamespaceManager {
                         dim,
                         kind,
                         has_ingested_at: true,
+                        attributes: request_attributes.clone(),
                     },
                     true,
                 )
             }
         };
+        let new_attributes = reconcile_attribute_schema(&mut info, &request_attributes)?;
 
         // Validate every row against the namespace's resolved kind
         // and dim. Mixed-shape requests fail at the API boundary
@@ -634,8 +847,18 @@ impl NamespaceManager {
         // then handles both cases uniformly: into an empty table every
         // row is "not matched" and inserted; into a populated table
         // matched ids are replaced and new ids inserted.
-        let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
-        let schema = Self::schema_for_kind(info.kind, info.dim, info.has_ingested_at);
+        let mut tbl = self
+            .get_or_open_table(ns, info.kind, info.dim, &info.attributes)
+            .await?;
+        if !new_attributes.is_empty() && !is_fresh {
+            add_null_attribute_columns(&tbl, &new_attributes).await?;
+            self.evict_handle(ns);
+            tbl = self
+                .get_or_open_table(ns, info.kind, info.dim, &info.attributes)
+                .await?;
+        }
+        let schema =
+            Self::schema_for_kind(info.kind, info.dim, info.has_ingested_at, &info.attributes);
         let batch = rows_to_batch(&schema, info.kind, info.dim, rows, info.has_ingested_at)?;
         let reader: Box<dyn RecordBatchReader + Send> =
             Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema));
@@ -648,7 +871,7 @@ impl NamespaceManager {
             .await
             .map_err(|e| FirnflowError::Backend(format!("table.merge_insert: {e}")))?;
 
-        self.schema_info.insert(ns.clone(), info);
+        self.schema_info.insert(ns.clone(), info.clone());
 
         // On the namespace's first write, build a BTree on `id` so
         // every subsequent merge-insert finds its matches through the
@@ -669,7 +892,10 @@ impl NamespaceManager {
                     // and let the next call re-open lazily; here the next
                     // call is the warm upsert, so re-pool eagerly).
                     self.evict_handle(ns);
-                    if let Err(e) = self.get_or_open_table(ns, info.kind, info.dim).await {
+                    if let Err(e) = self
+                        .get_or_open_table(ns, info.kind, info.dim, &info.attributes)
+                        .await
+                    {
                         tracing::warn!(
                             namespace = %ns,
                             error = %e,
@@ -730,11 +956,11 @@ impl NamespaceManager {
         reader: Box<dyn RecordBatchReader + Send>,
     ) -> Result<usize, FirnflowError> {
         let in_schema = reader.schema();
-        let (kind, dim, has_text) = validate_arrow_import_schema(&in_schema)?;
+        let (kind, dim, has_text, import_attributes) = validate_arrow_import_schema(&in_schema)?;
 
         // Fresh namespace: the stream fixes kind/dim. Existing: it must
         // match the established shape.
-        let info = match self.resolve_schema_info(ns).await? {
+        let (info, new_import_attributes) = match self.resolve_schema_info(ns).await? {
             Some(info) => {
                 if info.kind != kind || info.dim != dim {
                     return Err(FirnflowError::InvalidRequest(format!(
@@ -744,17 +970,32 @@ impl NamespaceManager {
                         info.dim,
                     )));
                 }
-                info
+                let mut info = info;
+                let added = reconcile_attribute_schema(&mut info, &import_attributes)?;
+                (info, added)
             }
-            None => NamespaceSchemaInfo {
-                dim,
-                kind,
-                has_ingested_at: true,
-            },
+            None => (
+                NamespaceSchemaInfo {
+                    dim,
+                    kind,
+                    has_ingested_at: true,
+                    attributes: import_attributes,
+                },
+                BTreeMap::new(),
+            ),
         };
 
-        let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
-        let canonical = Self::schema_for_kind(info.kind, info.dim, true);
+        let mut tbl = self
+            .get_or_open_table(ns, info.kind, info.dim, &info.attributes)
+            .await?;
+        if !new_import_attributes.is_empty() {
+            add_null_attribute_columns(&tbl, &new_import_attributes).await?;
+            self.evict_handle(ns);
+            tbl = self
+                .get_or_open_table(ns, info.kind, info.dim, &info.attributes)
+                .await?;
+        }
+        let canonical = Self::schema_for_kind(info.kind, info.dim, true, &info.attributes);
 
         // Column positions in the incoming stream (any order).
         let id_idx = in_schema
@@ -772,6 +1013,11 @@ impl NamespaceManager {
         } else {
             None
         };
+        let attr_indices: Vec<(String, usize)> = info
+            .attributes
+            .keys()
+            .filter_map(|name| in_schema.index_of(name).ok().map(|idx| (name.clone(), idx)))
+            .collect();
 
         let rows = Arc::new(AtomicU64::new(0));
         let ingest = IngestReader {
@@ -781,6 +1027,7 @@ impl NamespaceManager {
             id_idx,
             vec_idx,
             text_idx,
+            attr_indices,
             ts_micros: current_micros(),
             rows: Arc::clone(&rows),
         };
@@ -982,6 +1229,11 @@ impl NamespaceManager {
     /// `ingested_at_micros` but `vector: None`. The query vector is
     /// still used for search; only the response materialisation
     /// changes.
+    ///
+    /// `filter` is a DataFusion SQL predicate applied through
+    /// LanceDB's prefilter (`only_if`) before vector ranking or FTS
+    /// scoring. Malformed predicates are reported as
+    /// [`FirnflowError::InvalidRequest`].
     #[allow(clippy::too_many_arguments)]
     pub async fn query(
         &self,
@@ -991,6 +1243,7 @@ impl NamespaceManager {
         k: usize,
         nprobes: Option<usize>,
         text: Option<String>,
+        filter: Option<String>,
         include_vector: bool,
     ) -> Result<QueryResultSet, FirnflowError> {
         let info = match self.resolve_schema_info(ns).await? {
@@ -1068,7 +1321,9 @@ impl NamespaceManager {
         }
 
         let nprobes = nprobes.unwrap_or(DEFAULT_NPROBES);
-        let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
+        let tbl = self
+            .get_or_open_table(ns, info.kind, info.dim, &info.attributes)
+            .await?;
 
         // Opting out of the stored vector becomes a column projection:
         // Lance then never materialises the vector column into the
@@ -1084,6 +1339,9 @@ impl NamespaceManager {
             let mut cols = vec!["id", "text"];
             if info.has_ingested_at {
                 cols.push(INGESTED_AT_COLUMN);
+            }
+            for name in info.attributes.keys() {
+                cols.push(name.as_str());
             }
             Some(cols)
         };
@@ -1129,12 +1387,19 @@ impl NamespaceManager {
             if let Some(ref t) = text {
                 vq = vq.full_text_search(FullTextSearchQuery::new(t.clone()));
             }
+            if let Some(ref f) = filter {
+                vq = vq.only_if(f.clone());
+            }
             if let Some(ref cols) = projection {
                 vq = vq.select(Select::columns(cols));
             }
-            vq.execute()
-                .await
-                .map_err(|e| FirnflowError::Backend(format!("query.execute: {e}")))?
+            vq.execute().await.map_err(|e| {
+                if filter.is_some() {
+                    FirnflowError::InvalidRequest(format!("query filter: {e}"))
+                } else {
+                    FirnflowError::Backend(format!("query.execute: {e}"))
+                }
+            })?
         } else {
             // FTS-only
             let t = text.unwrap();
@@ -1142,12 +1407,19 @@ impl NamespaceManager {
                 .query()
                 .full_text_search(FullTextSearchQuery::new(t))
                 .limit(k);
+            if let Some(ref f) = filter {
+                q = q.only_if(f.clone());
+            }
             if let Some(ref cols) = projection {
                 q = q.select(Select::columns(cols));
             }
-            q.execute()
-                .await
-                .map_err(|e| FirnflowError::Backend(format!("fts.execute: {e}")))?
+            q.execute().await.map_err(|e| {
+                if filter.is_some() {
+                    FirnflowError::InvalidRequest(format!("query filter: {e}"))
+                } else {
+                    FirnflowError::Backend(format!("fts.execute: {e}"))
+                }
+            })?
         };
 
         let batches: Vec<RecordBatch> = stream
@@ -1191,7 +1463,9 @@ impl NamespaceManager {
             ))
         })?;
 
-        let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
+        let tbl = self
+            .get_or_open_table(ns, info.kind, info.dim, &info.attributes)
+            .await?;
 
         // Single-vector namespaces use the historical L2 default;
         // multivector namespaces use cosine — Lance's
@@ -1238,7 +1512,9 @@ impl NamespaceManager {
             ))
         })?;
 
-        let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
+        let tbl = self
+            .get_or_open_table(ns, info.kind, info.dim, &info.attributes)
+            .await?;
         tbl.create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
             .execute()
             .await
@@ -1276,13 +1552,12 @@ impl NamespaceManager {
         ns: &NamespaceId,
         column: &str,
     ) -> Result<(), FirnflowError> {
-        validate_scalar_index_column(column)?;
-
         let info = self.resolve_schema_info(ns).await?.ok_or_else(|| {
             FirnflowError::InvalidRequest(format!(
                 "cannot create scalar index on namespace {ns}: no data has been upserted yet"
             ))
         })?;
+        self.validate_scalar_index_column_for_info(ns, column, &info)?;
 
         if column == INGESTED_AT_COLUMN && !info.has_ingested_at {
             return Err(FirnflowError::Unsupported(format!(
@@ -1291,7 +1566,9 @@ impl NamespaceManager {
             )));
         }
 
-        let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
+        let tbl = self
+            .get_or_open_table(ns, info.kind, info.dim, &info.attributes)
+            .await?;
         tbl.create_index(&[column], Index::BTree(BTreeIndexBuilder::default()))
             .execute()
             .await
@@ -1304,6 +1581,43 @@ impl NamespaceManager {
         // need to re-run `create_scalar_index` after a compaction.
         self.evict_handle(ns);
         Ok(())
+    }
+
+    /// Validate that a scalar index can be built on `column` for the
+    /// namespace's live schema.
+    pub async fn validate_scalar_index_column_for_namespace(
+        &self,
+        ns: &NamespaceId,
+        column: &str,
+    ) -> Result<(), FirnflowError> {
+        let info = self.resolve_schema_info(ns).await?.ok_or_else(|| {
+            FirnflowError::InvalidRequest(format!(
+                "cannot create scalar index on namespace {ns}: no data has been upserted yet"
+            ))
+        })?;
+        self.validate_scalar_index_column_for_info(ns, column, &info)
+    }
+
+    fn validate_scalar_index_column_for_info(
+        &self,
+        ns: &NamespaceId,
+        column: &str,
+        info: &NamespaceSchemaInfo,
+    ) -> Result<(), FirnflowError> {
+        if SCALAR_INDEX_COLUMNS.contains(&column) || info.attributes.contains_key(column) {
+            if column == INGESTED_AT_COLUMN && !info.has_ingested_at {
+                return Err(FirnflowError::Unsupported(format!(
+                    "namespace {ns} pre-dates the _ingested_at column; \
+                     recreate the namespace before building a scalar index on it"
+                )));
+            }
+            Ok(())
+        } else {
+            Err(FirnflowError::InvalidRequest(format!(
+                "scalar index column {column:?} is not supported; valid columns are `id`, \
+                 `{INGESTED_AT_COLUMN}`, or a scalar attribute column"
+            )))
+        }
     }
 
     /// Compact the namespace's Lance table — merge small data files
@@ -1323,7 +1637,9 @@ impl NamespaceManager {
             ))
         })?;
 
-        let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
+        let tbl = self
+            .get_or_open_table(ns, info.kind, info.dim, &info.attributes)
+            .await?;
         let stats = tbl
             .optimize(OptimizeAction::default())
             .await
@@ -1400,7 +1716,9 @@ impl NamespaceManager {
             )));
         }
 
-        let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
+        let tbl = self
+            .get_or_open_table(ns, info.kind, info.dim, &info.attributes)
+            .await?;
         let dataset_wrapper = tbl
             .dataset()
             .ok_or_else(|| FirnflowError::Backend("list requires a native lance table".into()))?;
@@ -1464,6 +1782,102 @@ impl NamespaceManager {
         };
 
         Ok(ListPage { rows, next_cursor })
+    }
+
+    /// Compute value-count facets over the full filtered row set.
+    ///
+    /// This is independent of vector ranking and top-k: the scan
+    /// projects only the requested scalar columns, applies `filter`
+    /// when supplied, and counts every matching row.
+    pub async fn facet(
+        &self,
+        ns: &NamespaceId,
+        filter: Option<String>,
+        fields: &[String],
+        top: usize,
+    ) -> Result<FacetResultSet, FirnflowError> {
+        let info = match self.resolve_schema_info(ns).await? {
+            Some(i) => i,
+            None => return Ok(FacetResultSet { facets: Vec::new() }),
+        };
+        for field in fields {
+            validate_facet_field(field, &info)?;
+        }
+
+        let tbl = self
+            .get_or_open_table(ns, info.kind, info.dim, &info.attributes)
+            .await?;
+        let dataset_wrapper = tbl
+            .dataset()
+            .ok_or_else(|| FirnflowError::Backend("facet requires a native lance table".into()))?;
+        let dataset = dataset_wrapper
+            .get()
+            .await
+            .map_err(|e| FirnflowError::Backend(format!("resolve dataset: {e}")))?;
+
+        let mut scan = dataset.scan();
+        scan.project(fields)
+            .map_err(|e| FirnflowError::Backend(format!("facet project: {e}")))?;
+        if let Some(ref predicate) = filter {
+            scan.filter(predicate)
+                .map_err(|e| FirnflowError::InvalidRequest(format!("facet filter: {e}")))?;
+        }
+        let stream = scan.try_into_stream().await.map_err(|e| {
+            if filter.is_some() {
+                FirnflowError::InvalidRequest(format!("facet filter: {e}"))
+            } else {
+                FirnflowError::Backend(format!("facet scan: {e}"))
+            }
+        })?;
+        let batches: Vec<RecordBatch> = stream
+            .try_collect()
+            .await
+            .map_err(|e| FirnflowError::Backend(format!("facet collect: {e}")))?;
+
+        let mut counts: Vec<HashMap<String, (serde_json::Value, u64)>> =
+            fields.iter().map(|_| HashMap::new()).collect();
+        for batch in &batches {
+            for (field_idx, field) in fields.iter().enumerate() {
+                let col = batch.column_by_name(field).ok_or_else(|| {
+                    FirnflowError::Backend(format!("facet: missing projected column {field}"))
+                })?;
+                for row in 0..batch.num_rows() {
+                    // A list column contributes one count per element (a book
+                    // counts once per genre); a scalar contributes one value.
+                    for value in facet_values_at(col, row)? {
+                        let key = facet_value_sort_key(&value);
+                        let entry = counts[field_idx].entry(key).or_insert((value, 0));
+                        entry.1 += 1;
+                    }
+                }
+            }
+        }
+
+        let facets = fields
+            .iter()
+            .zip(counts)
+            .map(|(field, field_counts)| {
+                let mut buckets: Vec<FacetBucket> = field_counts
+                    .into_values()
+                    .map(|(value, count)| FacetBucket { value, count })
+                    .collect();
+                buckets.sort_by(|a, b| {
+                    b.count.cmp(&a.count).then_with(|| {
+                        facet_value_sort_key(&a.value).cmp(&facet_value_sort_key(&b.value))
+                    })
+                });
+                let truncated = buckets.len() > top;
+                if truncated {
+                    buckets.truncate(top);
+                }
+                FacetField {
+                    field: field.clone(),
+                    buckets,
+                    truncated,
+                }
+            })
+            .collect();
+        Ok(FacetResultSet { facets })
     }
 
     /// Gather operational metadata for a namespace without running a
@@ -1604,6 +2018,7 @@ async fn read_schema_info_from_table(
         .map_err(|e| FirnflowError::Backend(format!("read schema: {e}")))?;
     let mut dim_kind: Option<(usize, VectorKind)> = None;
     let mut has_ingested_at = false;
+    let mut attributes = BTreeMap::new();
     for field in schema.fields() {
         match field.name().as_str() {
             "vector" => match field.data_type() {
@@ -1625,7 +2040,12 @@ async fn read_schema_info_from_table(
                     has_ingested_at = true;
                 }
             }
-            _ => {}
+            "id" | "text" => {}
+            name => {
+                if let Some(ty) = AttributeType::from_arrow(field.data_type()) {
+                    attributes.insert(name.to_string(), ty);
+                }
+            }
         }
     }
     let (dim, kind) = dim_kind.ok_or_else(|| {
@@ -1637,6 +2057,7 @@ async fn read_schema_info_from_table(
         dim,
         kind,
         has_ingested_at,
+        attributes,
     })
 }
 
@@ -1697,7 +2118,7 @@ fn list_of_fixed_size_float_dim(dt: &DataType) -> Option<usize> {
 /// the background import.
 pub fn validate_arrow_import_schema(
     schema: &Schema,
-) -> Result<(VectorKind, usize, bool), FirnflowError> {
+) -> Result<(VectorKind, usize, bool, BTreeMap<String, AttributeType>), FirnflowError> {
     match schema.column_with_name("id") {
         Some((_, f)) if f.data_type() == &DataType::UInt64 => {}
         Some((_, f)) => {
@@ -1766,7 +2187,7 @@ pub fn validate_arrow_import_schema(
     // Float32, nullable) so `Table::add` accepts the column without a
     // cast. The dim probes above are lenient on child naming; this is
     // the strict gate.
-    let canonical = NamespaceManager::schema_for_kind(kind, dim, false);
+    let canonical = NamespaceManager::schema_for_kind(kind, dim, false, &BTreeMap::new());
     let canonical_vec = canonical.field(1).data_type();
     let vec_name = match kind {
         VectorKind::Single => "vector",
@@ -1792,29 +2213,39 @@ pub fn validate_arrow_import_schema(
         None => false,
     };
 
-    // Reject unknown columns so a misspelled name (or stray data the
-    // server would otherwise silently drop) is a clear 400. Only `id`,
-    // one of `vector`/`vectors`, and `text` are read. Arrow permits
+    // Extra columns are accepted as scalar attributes. Arrow permits
     // duplicate field names and column lookup returns the first match,
     // so a repeated column would silently shadow data — reject those too.
-    const ALLOWED: &[&str] = &["id", "vector", "vectors", "text"];
+    const BUILTIN: &[&str] = &["id", "vector", "vectors", "text"];
     let mut seen = HashSet::new();
+    let mut attributes = BTreeMap::new();
     for field in schema.fields() {
         let name = field.name().as_str();
-        if !ALLOWED.contains(&name) {
-            return Err(FirnflowError::InvalidRequest(format!(
-                "import: unexpected column `{name}`; allowed columns are `id`, \
-                 one of `vector`/`vectors`, and optional `text`"
-            )));
-        }
         if !seen.insert(name) {
             return Err(FirnflowError::InvalidRequest(format!(
                 "import: duplicate column `{name}`; each column may appear at most once"
             )));
         }
+        if BUILTIN.contains(&name) {
+            continue;
+        }
+        validate_attribute_name(name).map_err(|e| match e {
+            FirnflowError::InvalidRequest(msg) => {
+                FirnflowError::InvalidRequest(format!("import: {msg}"))
+            }
+            other => other,
+        })?;
+        let ty = AttributeType::from_arrow(field.data_type()).ok_or_else(|| {
+            FirnflowError::InvalidRequest(format!(
+                "import: attribute column `{name}` must be Int64, Float64, Boolean, Utf8, \
+                 or List<Utf8>, got {:?}",
+                field.data_type()
+            ))
+        })?;
+        attributes.insert(name.to_string(), ty);
     }
 
-    Ok((kind, dim, has_text))
+    Ok((kind, dim, has_text, attributes))
 }
 
 /// Classify a `Table::add` failure: an Arrow error means the client's
@@ -1843,6 +2274,7 @@ struct IngestReader {
     id_idx: usize,
     vec_idx: usize,
     text_idx: Option<usize>,
+    attr_indices: Vec<(String, usize)>,
     ts_micros: i64,
     rows: Arc<AtomicU64>,
 }
@@ -1933,7 +2365,18 @@ impl IngestReader {
             std::iter::repeat_n(self.ts_micros, n),
         ));
 
-        let out = RecordBatch::try_new(self.canonical.clone(), vec![id, vector, text, ts])?;
+        let mut columns = vec![id, vector, text, ts];
+        for field in self.canonical.fields().iter().skip(4) {
+            let attr = self
+                .attr_indices
+                .iter()
+                .find(|(name, _)| name == field.name())
+                .map(|(_, idx)| batch.column(*idx).clone())
+                .unwrap_or_else(|| new_null_array(field.data_type(), n));
+            columns.push(attr);
+        }
+
+        let out = RecordBatch::try_new(self.canonical.clone(), columns)?;
         self.rows.fetch_add(n as u64, Ordering::Relaxed);
         Ok(out)
     }
@@ -2099,8 +2542,132 @@ fn rows_to_batch(
         columns.push(Arc::new(ts_array) as ArrayRef);
     }
 
+    for (name, ty) in schema.fields().iter().skip(columns.len()).map(|f| {
+        let ty = AttributeType::from_arrow(f.data_type()).expect("attribute scalar type");
+        (f.name().clone(), ty)
+    }) {
+        columns.push(build_attribute_array(&rows, &name, ty)?);
+    }
+
     RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| FirnflowError::Backend(format!("batch build: {e}")))
+}
+
+fn build_attribute_array(
+    rows: &[UpsertRow],
+    name: &str,
+    ty: AttributeType,
+) -> Result<ArrayRef, FirnflowError> {
+    match ty {
+        AttributeType::Int64 => {
+            let mut builder = Int64Builder::with_capacity(rows.len());
+            for row in rows {
+                match row.attributes.get(name) {
+                    None | Some(serde_json::Value::Null) => builder.append_null(),
+                    Some(serde_json::Value::Number(n)) => {
+                        let value = n
+                            .as_i64()
+                            .or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok()))
+                            .ok_or_else(|| {
+                                FirnflowError::InvalidRequest(format!(
+                                    "attribute {name:?} must fit in Int64"
+                                ))
+                            })?;
+                        builder.append_value(value);
+                    }
+                    Some(_) => {
+                        return Err(FirnflowError::InvalidRequest(format!(
+                            "attribute {name:?} must be Int64 or null"
+                        )));
+                    }
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        AttributeType::Float64 => {
+            let mut builder = Float64Builder::with_capacity(rows.len());
+            for row in rows {
+                match row.attributes.get(name) {
+                    None | Some(serde_json::Value::Null) => builder.append_null(),
+                    Some(serde_json::Value::Number(n)) => {
+                        let value = n.as_f64().ok_or_else(|| {
+                            FirnflowError::InvalidRequest(format!(
+                                "attribute {name:?} must be Float64"
+                            ))
+                        })?;
+                        builder.append_value(value);
+                    }
+                    Some(_) => {
+                        return Err(FirnflowError::InvalidRequest(format!(
+                            "attribute {name:?} must be Float64 or null"
+                        )));
+                    }
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        AttributeType::Boolean => {
+            let mut builder = BooleanBuilder::with_capacity(rows.len());
+            for row in rows {
+                match row.attributes.get(name) {
+                    None | Some(serde_json::Value::Null) => builder.append_null(),
+                    Some(serde_json::Value::Bool(v)) => builder.append_value(*v),
+                    Some(_) => {
+                        return Err(FirnflowError::InvalidRequest(format!(
+                            "attribute {name:?} must be Boolean or null"
+                        )));
+                    }
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        AttributeType::Utf8 => {
+            let mut builder = StringBuilder::with_capacity(rows.len(), rows.len() * 16);
+            for row in rows {
+                match row.attributes.get(name) {
+                    None | Some(serde_json::Value::Null) => builder.append_null(),
+                    Some(serde_json::Value::String(v)) => builder.append_value(v),
+                    Some(_) => {
+                        return Err(FirnflowError::InvalidRequest(format!(
+                            "attribute {name:?} must be Utf8 or null"
+                        )));
+                    }
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        AttributeType::StringList => {
+            // ListBuilder<StringBuilder> yields List(item: Utf8, nullable),
+            // matching AttributeType::StringList::arrow(). A missing key or
+            // JSON null is a null list; `[]` is an empty (non-null) list.
+            let mut builder = ListBuilder::new(StringBuilder::new());
+            for row in rows {
+                match row.attributes.get(name) {
+                    None | Some(serde_json::Value::Null) => builder.append_null(),
+                    Some(serde_json::Value::Array(items)) => {
+                        for item in items {
+                            match item {
+                                serde_json::Value::String(v) => builder.values().append_value(v),
+                                serde_json::Value::Null => builder.values().append_null(),
+                                _ => {
+                                    return Err(FirnflowError::InvalidRequest(format!(
+                                        "attribute {name:?} must be a list of strings"
+                                    )));
+                                }
+                            }
+                        }
+                        builder.append(true);
+                    }
+                    Some(_) => {
+                        return Err(FirnflowError::InvalidRequest(format!(
+                            "attribute {name:?} must be a string list or null"
+                        )));
+                    }
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+    }
 }
 
 /// Find the score column in a result batch. Lance uses different
@@ -2210,6 +2777,7 @@ fn batches_to_list_rows(
                 vector,
                 text,
                 ingested_at_micros: ingested_at.value(row),
+                attributes: extract_scalar_attributes(batch, row),
             });
         }
     }
@@ -2277,10 +2845,184 @@ fn batches_to_results(
                 vector,
                 text,
                 ingested_at_micros,
+                attributes: extract_scalar_attributes(batch, row),
             });
         }
     }
     Ok(out)
+}
+
+fn extract_scalar_attributes(
+    batch: &RecordBatch,
+    row: usize,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    for (idx, field) in batch.schema().fields().iter().enumerate() {
+        let name = field.name();
+        if RESERVED_ATTRIBUTE_COLUMNS.contains(&name.as_str()) {
+            continue;
+        }
+        let value = match field.data_type() {
+            DataType::Int64 => batch
+                .column(idx)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .map(|a| {
+                    if a.is_null(row) {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::from(a.value(row))
+                    }
+                }),
+            DataType::Float64 => batch
+                .column(idx)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .map(|a| {
+                    if a.is_null(row) {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::from(a.value(row))
+                    }
+                }),
+            DataType::Boolean => batch
+                .column(idx)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .map(|a| {
+                    if a.is_null(row) {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::from(a.value(row))
+                    }
+                }),
+            DataType::Utf8 => batch
+                .column(idx)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(|a| {
+                    if a.is_null(row) {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::from(a.value(row))
+                    }
+                }),
+            DataType::List(item) if *item.data_type() == DataType::Utf8 => batch
+                .column(idx)
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .map(|a| {
+                    if a.is_null(row) {
+                        serde_json::Value::Null
+                    } else {
+                        let elems = a.value(row);
+                        match elems.as_any().downcast_ref::<StringArray>() {
+                            Some(sa) => serde_json::Value::Array(
+                                (0..sa.len())
+                                    .map(|i| {
+                                        if sa.is_null(i) {
+                                            serde_json::Value::Null
+                                        } else {
+                                            serde_json::Value::from(sa.value(i))
+                                        }
+                                    })
+                                    .collect(),
+                            ),
+                            None => serde_json::Value::Null,
+                        }
+                    }
+                }),
+            _ => None,
+        };
+        if let Some(value) = value {
+            out.insert(name.clone(), value);
+        }
+    }
+    out
+}
+
+fn validate_facet_field(field: &str, info: &NamespaceSchemaInfo) -> Result<(), FirnflowError> {
+    match field {
+        "id" => Ok(()),
+        INGESTED_AT_COLUMN if info.has_ingested_at => Ok(()),
+        "vector" | "vectors" | "text" => Err(FirnflowError::InvalidRequest(format!(
+            "field {field:?} is not facetable"
+        ))),
+        name if info.attributes.contains_key(name) => Ok(()),
+        _ => Err(FirnflowError::InvalidRequest(format!(
+            "unknown facet field {field:?}"
+        ))),
+    }
+}
+
+/// Facet contribution(s) for one row of a facet column. A `List<Utf8>`
+/// column yields one value per (non-null) element, so a multi-valued row
+/// (e.g. a book's genres) is counted in every bucket it belongs to; a
+/// null or empty list contributes nothing. A scalar column yields exactly
+/// one value (its scalar, or JSON null for a null cell).
+fn facet_values_at(array: &ArrayRef, row: usize) -> Result<Vec<serde_json::Value>, FirnflowError> {
+    if let Some(a) = array.as_any().downcast_ref::<ListArray>() {
+        if a.is_null(row) {
+            return Ok(Vec::new());
+        }
+        let elems = a.value(row);
+        let strs = elems.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+            FirnflowError::InvalidRequest("facet list field must be a list of strings".into())
+        })?;
+        let mut out = Vec::with_capacity(strs.len());
+        for i in 0..strs.len() {
+            if !strs.is_null(i) {
+                out.push(serde_json::Value::from(strs.value(i)));
+            }
+        }
+        return Ok(out);
+    }
+    Ok(vec![scalar_value_at(array, row)?])
+}
+
+fn scalar_value_at(array: &ArrayRef, row: usize) -> Result<serde_json::Value, FirnflowError> {
+    if array.is_null(row) {
+        return Ok(serde_json::Value::Null);
+    }
+    if let Some(a) = array.as_any().downcast_ref::<UInt64Array>() {
+        return Ok(serde_json::Value::from(a.value(row)));
+    }
+    if let Some(a) = array.as_any().downcast_ref::<Int64Array>() {
+        return Ok(serde_json::Value::from(a.value(row)));
+    }
+    if let Some(a) = array.as_any().downcast_ref::<Float64Array>() {
+        return Ok(serde_json::Value::from(a.value(row)));
+    }
+    if let Some(a) = array.as_any().downcast_ref::<BooleanArray>() {
+        return Ok(serde_json::Value::from(a.value(row)));
+    }
+    if let Some(a) = array.as_any().downcast_ref::<StringArray>() {
+        return Ok(serde_json::Value::from(a.value(row)));
+    }
+    if let Some(a) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+        return Ok(serde_json::Value::from(a.value(row)));
+    }
+    Err(FirnflowError::InvalidRequest(
+        "facet fields must be scalar columns".into(),
+    ))
+}
+
+fn facet_value_sort_key(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "0:".to_string(),
+        serde_json::Value::Bool(v) => format!("1:{v}"),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                format!("2:{i:020}")
+            } else if let Some(u) = n.as_u64() {
+                format!("2:{u:020}")
+            } else {
+                format!("2:{:020.12}", n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => format!("3:{s}"),
+        _ => "4:".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -2332,14 +3074,16 @@ mod tests {
 
     #[test]
     fn import_schema_validation() {
-        let single_vec = NamespaceManager::schema_for_kind(VectorKind::Single, 4, false)
-            .field(1)
-            .data_type()
-            .clone();
-        let multi_vec = NamespaceManager::schema_for_kind(VectorKind::Multivector, 4, false)
-            .field(1)
-            .data_type()
-            .clone();
+        let single_vec =
+            NamespaceManager::schema_for_kind(VectorKind::Single, 4, false, &BTreeMap::new())
+                .field(1)
+                .data_type()
+                .clone();
+        let multi_vec =
+            NamespaceManager::schema_for_kind(VectorKind::Multivector, 4, false, &BTreeMap::new())
+                .field(1)
+                .data_type()
+                .clone();
 
         // Happy: single-vector, no text.
         let s = Schema::new(vec![
@@ -2348,7 +3092,7 @@ mod tests {
         ]);
         assert_eq!(
             validate_arrow_import_schema(&s).unwrap(),
-            (VectorKind::Single, 4, false)
+            (VectorKind::Single, 4, false, BTreeMap::new())
         );
 
         // Happy: multivector with text.
@@ -2359,8 +3103,18 @@ mod tests {
         ]);
         assert_eq!(
             validate_arrow_import_schema(&s).unwrap(),
-            (VectorKind::Multivector, 4, true)
+            (VectorKind::Multivector, 4, true, BTreeMap::new())
         );
+
+        let s = Schema::new(vec![
+            Field::new("id", DataType::UInt64, false),
+            Field::new("vector", single_vec.clone(), false),
+            Field::new("section", DataType::Utf8, true),
+            Field::new("priority", DataType::Int64, true),
+        ]);
+        let (_, _, _, attrs) = validate_arrow_import_schema(&s).unwrap();
+        assert_eq!(attrs.get("section"), Some(&AttributeType::Utf8));
+        assert_eq!(attrs.get("priority"), Some(&AttributeType::Int64));
 
         // Each of these must be rejected as InvalidRequest.
         let bad_float =
@@ -2402,11 +3156,17 @@ mod tests {
                 Field::new("vector", single_vec.clone(), false),
                 Field::new("text", DataType::Int32, true),
             ]),
-            // unknown/extra column (e.g. a misspelled name)
+            // unsupported attribute type
             Schema::new(vec![
                 Field::new("id", DataType::UInt64, false),
                 Field::new("vector", single_vec.clone(), false),
-                Field::new("vectr", single_vec.clone(), false),
+                Field::new("bad", single_vec.clone(), false),
+            ]),
+            // reserved attribute name
+            Schema::new(vec![
+                Field::new("id", DataType::UInt64, false),
+                Field::new("vector", single_vec.clone(), false),
+                Field::new("_bad", DataType::Utf8, true),
             ]),
             // duplicate column name (Arrow allows it; we reject it so the
             // second does not silently shadow the first)

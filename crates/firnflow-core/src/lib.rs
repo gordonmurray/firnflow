@@ -27,9 +27,13 @@ pub use metrics::CoreMetrics;
 pub use namespace::NamespaceId;
 pub use query::{
     effective_semantic_threshold, validate_ivf_pq_options, validate_semantic_cache_request,
-    IndexRequest, QueryRequest, SemanticCacheRequest, DEFAULT_SEMANTIC_MIN_SIMILARITY,
+    FacetRequest, IndexRequest, QueryRequest, SemanticCacheRequest,
+    DEFAULT_SEMANTIC_MIN_SIMILARITY,
 };
-pub use result::{ListOrder, ListPage, ListRow, NamespaceInfo, QueryResult, QueryResultSet};
+pub use result::{
+    FacetBucket, FacetField, FacetResultSet, ListOrder, ListPage, ListRow, NamespaceInfo,
+    QueryResult, QueryResultSet,
+};
 pub use service::{NamespaceService, QueryCacheSource, QueryOutcome};
 pub use storage_root::{resolve_s3_region, Scheme, StorageRoot};
 pub use vector::VectorKind;

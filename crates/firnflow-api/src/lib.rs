@@ -71,6 +71,7 @@ pub fn router(state: AppState) -> Router {
     let read = Router::new()
         .route("/ns/{namespace}/upsert", post(handlers::upsert))
         .route("/ns/{namespace}/query", post(handlers::query))
+        .route("/ns/{namespace}/facet", post(handlers::facet))
         .route("/ns/{namespace}/list", get(handlers::list))
         .route("/ns/{namespace}/warmup", post(handlers::warmup))
         // GET /ns/{namespace} (namespace metadata) shares its path with

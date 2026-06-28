@@ -197,12 +197,13 @@ curl -X POST http://localhost:3000/ns/demo/upsert \
      -H 'Content-Type: application/json' \
      -d '{
        "rows": [
-         {"id": 1, "vector": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+         {"id": 1, "vector": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+          "attributes": {"section": "warnings", "route": "oral"}}
        ]
      }'
 ```
 
-Upsert is keyed by `id` and is latest-write-wins: re-sending a row whose `id` already exists replaces the stored row in full rather than adding a second copy, so retries and genuine updates are both safe. Ids must be unique within a single request. The `_ingested_at` timestamp tracks the most recent write to a row, not its first insert. The first write to a namespace builds a BTree index on `id` so later batches find their matches through the index instead of scanning every data file. See [Loading data at scale](#loading-data-at-scale) for first-load guidance.
+Upsert is keyed by `id` and is latest-write-wins: re-sending a row whose `id` already exists replaces the stored row in full rather than adding a second copy, so retries and genuine updates are both safe. Rows may carry scalar `attributes` (string, integer, float, boolean, or null) for filtering and facets. Ids must be unique within a single request. The `_ingested_at` timestamp tracks the most recent write to a row, not its first insert. The first write to a namespace builds a BTree index on `id` so later batches find their matches through the index instead of scanning every data file. See [Loading data at scale](#loading-data-at-scale) for first-load guidance.
 
 ### 3. Perform a Search
 Query the same namespace for the nearest neighbor:
@@ -214,6 +215,18 @@ curl -X POST http://localhost:3000/ns/demo/query \
 ```
 
 Hits carry the stored vector by default. Add `"include_vector": false` to the request if you only need ids, scores, and text. At realistic dimensions the vectors are most of the response bytes, so skipping them shrinks the response and the cached result, and can cut the object-storage read for the returned rows' vectors. It is response projection, not a scan optimisation: Lance still reads whatever it needs to score the query.
+
+Add `"filter": "id > 1000"` or an `_ingested_at` predicate to scope vector, full-text, or hybrid search to matching rows. Filters use the same DataFusion SQL predicate dialect as `/list` and are applied before nearest-neighbour ranking, so vector queries return up to `k` neighbours that satisfy the predicate.
+
+Facet counts are available separately from ranking:
+
+```bash
+curl -X POST http://localhost:3000/ns/demo/facet \
+     -H 'Content-Type: application/json' \
+     -d '{"fields": ["section", "route"], "filter": "route = '\''oral'\''", "top": 10}'
+```
+
+Facet buckets count every row matching the filter, not just a query top-k. Missing values are returned as a `null` bucket and high-cardinality fields set `truncated: true` when capped by `top`.
 
 ### 4. Check the Savings
 See how much object-storage traffic you've avoided:
@@ -251,6 +264,7 @@ If `FIRNFLOW_ADMIN_API_KEY` is unset, the read/write key authorises admin routes
 | `/ns/{ns}/upsert` | `POST` | read/write | Insert or update vectors and data (latest-write-wins by `id`) |
 | `/ns/{ns}/import` | `POST` | read/write | Bulk-ingest an Arrow IPC stream (binary, insert-only, async 202). For large first loads; bypasses the JSON body limit |
 | `/ns/{ns}/query` | `POST` | read/write | Vector, FTS, or hybrid search |
+| `/ns/{ns}/facet` | `POST` | read/write | Facet counts over scalar fields for the full filtered set |
 | `/ns/{ns}/list` | `GET` | read/write | Cursor-paginated list ordered by `_ingested_at` |
 | `/ns/{ns}/warmup` | `POST` | read/write | Non-blocking cache pre-warm hint |
 | `/ns/{ns}/index` | `POST` | admin | Build IVF_PQ vector index (async, returns 202) |
@@ -277,7 +291,7 @@ A recommended recipe for a first load:
 
 1. **Load** the data with `POST /ns/{ns}/import` (one Arrow IPC stream, or a few large ones).
 2. **Compact** once the load is done: `POST /ns/{ns}/compact`. This merges data files into fewer large ones.
-3. **Build the query indexes**: `POST /ns/{ns}/index` (vector), `POST /ns/{ns}/fts-index` (full-text), `POST /ns/{ns}/scalar-index` with `{"column": "id"}` if you will then do idempotent `/upsert` updates, and `{"column": "_ingested_at"}` if you page with `/list`. These are async; poll `GET /operations/{id}`.
+3. **Build the query indexes**: `POST /ns/{ns}/index` (vector), `POST /ns/{ns}/fts-index` (full-text), `POST /ns/{ns}/scalar-index` with `{"column": "id"}` if you will then do idempotent `/upsert` updates, `{"column": "_ingested_at"}` if you page with `/list`, or an attribute column if filters/facets lean on it. These are async; poll `GET /operations/{id}`.
 4. **Query.**
 
 If you stay on the JSON `/upsert` path (smaller loads, or idempotent updates), size batches up toward `FIRNFLOW_MAX_BODY_BYTES` rather than sending rows a handful at a time, and build indexes after the load rather than during it.
@@ -347,7 +361,7 @@ The read path is:
 
 **v1 boundaries** (returns 400 otherwise):
 
-- single-vector queries only: `vectors`, `text`, and hybrid shapes are rejected when `semantic_cache.enabled` is true;
+- single-vector queries only: `vectors`, `text`, `filter`, and hybrid shapes are rejected when `semantic_cache.enabled` is true;
 - `min_similarity` must be in `(0.0, 1.0]`. Omitting picks a deliberately strict default of `0.995`;
 - the sidecar is in-memory, single-process, and bounded to 1024 entries per namespace generation. Any committed change drops both layers for the namespace: writes, deletes, and compactions, and also index builds, since an index build is itself a Lance commit that advances the table version the cache keys on.
 

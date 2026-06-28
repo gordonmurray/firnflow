@@ -2601,6 +2601,7 @@ dependencies = [
  "object_store 0.12.5",
  "prometheus",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2615,6 +2616,7 @@ version = "0.1.0"
 dependencies = [
  "firnflow-core",
  "pyo3",
+ "serde_json",
  "tokio",
 ]
 

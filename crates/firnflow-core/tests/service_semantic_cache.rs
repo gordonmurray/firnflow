@@ -85,6 +85,7 @@ fn semantic_request(vector: Vec<f32>, threshold: Option<f32>) -> QueryRequest {
         k: 5,
         nprobes: None,
         text: None,
+        filter: None,
         include_vector: true,
         semantic_cache: Some(SemanticCacheRequest {
             enabled: true,
@@ -100,6 +101,7 @@ fn plain_request(vector: Vec<f32>) -> QueryRequest {
         k: 5,
         nprobes: None,
         text: None,
+        filter: None,
         include_vector: true,
         semantic_cache: None,
     }
@@ -257,6 +259,7 @@ async fn k_mismatch_does_not_reuse() {
         k: 5,
         nprobes: None,
         text: None,
+        filter: None,
         include_vector: true,
         semantic_cache: Some(SemanticCacheRequest {
             enabled: true,
@@ -273,6 +276,7 @@ async fn k_mismatch_does_not_reuse() {
         k: 10,
         nprobes: None,
         text: None,
+        filter: None,
         include_vector: true,
         semantic_cache: Some(SemanticCacheRequest {
             enabled: true,
@@ -297,6 +301,7 @@ async fn ineligible_request_returns_400_at_service_boundary() {
         k: 5,
         nprobes: None,
         text: Some("anything".into()),
+        filter: None,
         include_vector: true,
         semantic_cache: Some(SemanticCacheRequest {
             enabled: true,

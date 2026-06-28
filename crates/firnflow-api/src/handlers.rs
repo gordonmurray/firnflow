@@ -31,8 +31,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
 use firnflow_core::{
-    decode_list_cursor, validate_arrow_import_schema, FirnflowError, IndexRequest, ListOrder,
-    ListPage, NamespaceId, NamespaceInfo, QueryRequest, UpsertRow as CoreUpsertRow, LIST_MAX_LIMIT,
+    decode_list_cursor, validate_arrow_import_schema, FacetRequest, FacetResultSet, FirnflowError,
+    IndexRequest, ListOrder, ListPage, NamespaceId, NamespaceInfo, QueryRequest,
+    UpsertRow as CoreUpsertRow, LIST_MAX_LIMIT,
 };
 
 use crate::error::ApiError;
@@ -136,6 +137,9 @@ pub struct UpsertRow {
     /// Optional text payload for full-text search.
     #[serde(default)]
     pub text: Option<String>,
+    /// Optional user-defined scalar attributes.
+    #[serde(default)]
+    pub attributes: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Body of `POST /ns/{namespace}/upsert`.
@@ -173,6 +177,7 @@ pub async fn upsert(
             vector: r.vector,
             vectors: r.vectors,
             text: r.text,
+            attributes: r.attributes,
         })
         .collect();
     state.service.upsert(&ns, rows).await?;
@@ -201,6 +206,17 @@ pub async fn query(
         );
     }
     Ok(response)
+}
+
+/// Compute facet counts for one or more scalar fields over a filtered set.
+pub async fn facet(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+    Json(req): Json<FacetRequest>,
+) -> Result<Json<FacetResultSet>, ApiError> {
+    let ns = NamespaceId::new(namespace)?;
+    let result = state.service.facet(&ns, &req).await?;
+    Ok(Json(result))
 }
 
 /// Delete a namespace: remove every S3 object under its prefix and
@@ -430,7 +446,16 @@ pub async fn create_scalar_index(
 
     // Reject an unsupported column up front so the caller gets a 400
     // rather than a 202 followed by a log-only background failure.
-    firnflow_core::validate_scalar_index_column(&column).map_err(ApiError::Core)?;
+    if firnflow_core::validate_scalar_index_column(&column).is_err() {
+        if matches!(column.as_str(), "vector" | "vectors" | "text") || column.starts_with('_') {
+            firnflow_core::validate_scalar_index_column(&column).map_err(ApiError::Core)?;
+        }
+        state
+            .manager
+            .validate_scalar_index_column_for_namespace(&ns, &column)
+            .await
+            .map_err(ApiError::Core)?;
+    }
 
     let operation_id = state
         .operations

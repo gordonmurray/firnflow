@@ -8,6 +8,7 @@
 //! follow once the API layer is wired up.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::vector::VectorKind;
 
@@ -42,6 +43,9 @@ pub struct QueryResult {
     /// `None` for namespaces created before the column existed.
     #[serde(default)]
     pub ingested_at_micros: Option<i64>,
+    /// User-defined scalar attributes stored on the row.
+    #[serde(default)]
+    pub attributes: serde_json::Map<String, Value>,
 }
 
 /// A full query response: ranked hits plus an opaque tracing id.
@@ -53,6 +57,35 @@ pub struct QueryResultSet {
     pub query_id: String,
     /// Search hits, already ranked by the underlying engine.
     pub results: Vec<QueryResult>,
+}
+
+/// One value-count bucket in a facet response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FacetBucket {
+    /// JSON scalar value for the bucket. Missing/null values are
+    /// represented as JSON `null`.
+    pub value: Value,
+    /// Number of rows in the filtered set with this value.
+    pub count: u64,
+}
+
+/// Buckets for one requested facet field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FacetField {
+    /// Column name.
+    pub field: String,
+    /// Buckets sorted count-desc, then value-asc.
+    pub buckets: Vec<FacetBucket>,
+    /// True when more distinct values existed than the requested
+    /// per-field `top`.
+    pub truncated: bool,
+}
+
+/// Complete facet response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FacetResultSet {
+    /// One entry per requested field.
+    pub facets: Vec<FacetField>,
 }
 
 /// Sort order for the `list` endpoint. Descending returns newest
@@ -84,6 +117,9 @@ pub struct ListRow {
     /// replaces the row and advances this value, so it reflects the
     /// latest write rather than the first insert.
     pub ingested_at_micros: i64,
+    /// User-defined scalar attributes stored on the row.
+    #[serde(default)]
+    pub attributes: serde_json::Map<String, Value>,
 }
 
 /// A page of list results plus an opaque cursor for the next page.

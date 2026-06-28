@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Rows may carry scalar `attributes` (`Int64`, `Float64`, `Boolean`, `Utf8`) through JSON `/upsert`, Arrow `/import`, query/list results, and filters. Attribute names must be SQL-friendly identifiers and may not collide with system columns.
+- `POST /ns/{namespace}/facet` returns value-count buckets for scalar fields over the full filtered set, not the returned top-k. Buckets include `null` for missing values, are capped by per-field `top` with a `truncated` flag, and use the same generation-based exact cache as query results. The embedded Python package mirrors this with `facet(fields=[...], filter=..., top=...)`.
+- `POST /ns/{namespace}/query` accepts an optional `filter` string, a DataFusion SQL predicate applied through LanceDB before vector ranking, full-text scoring, or hybrid fusion. Filtered vector queries return up to `k` neighbours satisfying the predicate rather than filtering an already-selected top-k. The field participates in the exact-cache key, malformed predicates return `400 InvalidRequest`, and `semantic_cache.enabled` rejects filtered requests in v1. The embedded Python package mirrors this with `search(filter=...)`. Part 1 of #84.
+
 ## [0.9.2] - 2026-06-19
 
 ### Added

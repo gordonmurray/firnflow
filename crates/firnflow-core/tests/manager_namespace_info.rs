@@ -65,6 +65,7 @@ fn row(id: u64, axis: usize, text: &str) -> UpsertRow {
         vector,
         vectors: None,
         text: Some(text.to_string()),
+        attributes: serde_json::Map::new(),
     }
 }
 

@@ -12,7 +12,8 @@
 use std::collections::HashMap;
 
 use firnflow_core::metrics::test_metrics;
-use firnflow_core::{NamespaceId, NamespaceManager, StorageRoot, UpsertRow};
+use firnflow_core::{FirnflowError, NamespaceId, NamespaceManager, StorageRoot, UpsertRow};
+use serde_json::json;
 use tempfile::TempDir;
 
 const DIM: usize = 8;
@@ -53,7 +54,7 @@ async fn local_fs_upsert_query_roundtrip() {
     );
 
     let results = manager
-        .query(&ns, unit_vector(0), None, 3, None, None, true)
+        .query(&ns, unit_vector(0), None, 3, None, None, None, true)
         .await
         .expect("local query");
 
@@ -87,18 +88,21 @@ async fn local_fs_fts_text_search() {
             vector: unit_vector(0),
             vectors: None,
             text: Some("the quick brown fox".into()),
+            attributes: serde_json::Map::new(),
         },
         UpsertRow {
             id: 2,
             vector: unit_vector(1),
             vectors: None,
             text: Some("a lazy dog sleeps".into()),
+            attributes: serde_json::Map::new(),
         },
         UpsertRow {
             id: 3,
             vector: unit_vector(2),
             vectors: None,
             text: Some("the fox runs fast".into()),
+            attributes: serde_json::Map::new(),
         },
     ];
     manager.upsert(&ns, rows).await.expect("local upsert");
@@ -109,7 +113,16 @@ async fn local_fs_fts_text_search() {
 
     // FTS-only: empty vector, text set.
     let results = manager
-        .query(&ns, Vec::new(), None, 10, None, Some("fox".into()), false)
+        .query(
+            &ns,
+            Vec::new(),
+            None,
+            10,
+            None,
+            Some("fox".into()),
+            None,
+            false,
+        )
         .await
         .expect("fts query");
     let ids: Vec<u64> = results.results.iter().map(|r| r.id).collect();
@@ -121,6 +134,311 @@ async fn local_fs_fts_text_search() {
         !ids.contains(&2),
         "row 2 has no 'fox' and must not match, got {ids:?}"
     );
+}
+
+#[tokio::test]
+async fn local_fs_query_filter_narrows_vector_results() {
+    let dir = TempDir::new().unwrap();
+    let manager = local_manager(&dir);
+    let ns = NamespaceId::new("embedded-filter-vector").unwrap();
+
+    let rows: Vec<UpsertRow> = vec![
+        (1u64, unit_vector(0)).into(),
+        (2u64, unit_vector(1)).into(),
+        (3u64, unit_vector(2)).into(),
+    ];
+    manager.upsert(&ns, rows).await.expect("local upsert");
+
+    let results = manager
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            3,
+            None,
+            None,
+            Some("id > 1".into()),
+            false,
+        )
+        .await
+        .expect("filtered vector query");
+    let mut ids: Vec<u64> = results.results.iter().map(|r| r.id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![2, 3], "filter should exclude id=1");
+}
+
+#[tokio::test]
+async fn local_fs_query_filter_accepts_ingested_at_ranges() {
+    let dir = TempDir::new().unwrap();
+    let manager = local_manager(&dir);
+    let ns = NamespaceId::new("embedded-filter-ingested").unwrap();
+
+    let rows: Vec<UpsertRow> = vec![(1u64, unit_vector(0)).into(), (2u64, unit_vector(1)).into()];
+    manager.upsert(&ns, rows).await.expect("local upsert");
+
+    let all = manager
+        .query(&ns, unit_vector(0), None, 2, None, None, None, false)
+        .await
+        .expect("unfiltered query");
+    let cutoff = all.results[0]
+        .ingested_at_micros
+        .expect("ingested_at on query hit");
+
+    let results = manager
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            2,
+            None,
+            None,
+            Some(format!("_ingested_at >= to_timestamp_micros({cutoff})")),
+            false,
+        )
+        .await
+        .expect("filtered ingested_at query");
+    assert_eq!(results.results.len(), 2);
+}
+
+#[tokio::test]
+async fn local_fs_query_filter_narrows_fts_and_hybrid_results() {
+    let dir = TempDir::new().unwrap();
+    let manager = local_manager(&dir);
+    let ns = NamespaceId::new("embedded-filter-fts-hybrid").unwrap();
+
+    let rows: Vec<UpsertRow> = vec![
+        UpsertRow {
+            id: 1,
+            vector: unit_vector(0),
+            vectors: None,
+            text: Some("fox warning".into()),
+            attributes: serde_json::Map::new(),
+        },
+        UpsertRow {
+            id: 2,
+            vector: unit_vector(1),
+            vectors: None,
+            text: Some("fox dosing".into()),
+            attributes: serde_json::Map::new(),
+        },
+        UpsertRow {
+            id: 3,
+            vector: unit_vector(2),
+            vectors: None,
+            text: Some("dog warning".into()),
+            attributes: serde_json::Map::new(),
+        },
+    ];
+    manager.upsert(&ns, rows).await.expect("local upsert");
+    manager
+        .create_fts_index(&ns)
+        .await
+        .expect("create fts index");
+
+    let fts = manager
+        .query(
+            &ns,
+            Vec::new(),
+            None,
+            10,
+            None,
+            Some("fox".into()),
+            Some("id = 2".into()),
+            false,
+        )
+        .await
+        .expect("filtered fts query");
+    let fts_ids: Vec<u64> = fts.results.iter().map(|r| r.id).collect();
+    assert_eq!(fts_ids, vec![2]);
+
+    let hybrid = manager
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            10,
+            None,
+            Some("fox".into()),
+            Some("id = 2".into()),
+            false,
+        )
+        .await
+        .expect("filtered hybrid query");
+    let hybrid_ids: Vec<u64> = hybrid.results.iter().map(|r| r.id).collect();
+    assert_eq!(hybrid_ids, vec![2]);
+}
+
+#[tokio::test]
+async fn local_fs_facet_counts_attributes_with_filter_null_and_truncation() {
+    let dir = TempDir::new().unwrap();
+    let manager = local_manager(&dir);
+    let ns = NamespaceId::new("embedded-facet").unwrap();
+
+    let attr = |section: serde_json::Value, route: Option<&str>| {
+        let mut attributes = serde_json::Map::new();
+        attributes.insert("section".into(), section);
+        if let Some(route) = route {
+            attributes.insert("route".into(), json!(route));
+        }
+        attributes
+    };
+    manager
+        .upsert(
+            &ns,
+            vec![
+                UpsertRow {
+                    id: 1,
+                    vector: unit_vector(0),
+                    vectors: None,
+                    text: Some("warning oral".into()),
+                    attributes: attr(json!("warnings"), Some("oral")),
+                },
+                UpsertRow {
+                    id: 2,
+                    vector: unit_vector(1),
+                    vectors: None,
+                    text: Some("dosage oral".into()),
+                    attributes: attr(json!("dosage"), Some("oral")),
+                },
+                UpsertRow {
+                    id: 3,
+                    vector: unit_vector(2),
+                    vectors: None,
+                    text: Some("warning missing".into()),
+                    attributes: attr(json!("warnings"), None),
+                },
+            ],
+        )
+        .await
+        .expect("upsert");
+
+    let result = manager
+        .facet(
+            &ns,
+            Some("id >= 1".into()),
+            &["section".into(), "route".into()],
+            1,
+        )
+        .await
+        .expect("facet");
+
+    let section = result.facets.iter().find(|f| f.field == "section").unwrap();
+    assert!(section.truncated);
+    assert_eq!(section.buckets[0].value, json!("warnings"));
+    assert_eq!(section.buckets[0].count, 2);
+
+    let route = result.facets.iter().find(|f| f.field == "route").unwrap();
+    assert!(route.truncated);
+    assert_eq!(route.buckets[0].value, json!("oral"));
+    assert_eq!(route.buckets[0].count, 2);
+
+    let narrowed = manager
+        .facet(
+            &ns,
+            Some("section = 'dosage'".into()),
+            &["section".into()],
+            10,
+        )
+        .await
+        .expect("filtered facet");
+    assert_eq!(narrowed.facets[0].buckets.len(), 1);
+    assert_eq!(narrowed.facets[0].buckets[0].value, json!("dosage"));
+    assert_eq!(narrowed.facets[0].buckets[0].count, 1);
+
+    manager
+        .create_scalar_index(&ns, "section")
+        .await
+        .expect("attribute scalar index");
+}
+
+#[tokio::test]
+async fn local_fs_facet_rejects_bad_filter_and_non_facetable_field() {
+    let dir = TempDir::new().unwrap();
+    let manager = local_manager(&dir);
+    let ns = NamespaceId::new("embedded-facet-errors").unwrap();
+    let mut attributes = serde_json::Map::new();
+    attributes.insert("section".into(), json!("warnings"));
+    manager
+        .upsert(
+            &ns,
+            vec![UpsertRow {
+                id: 1,
+                vector: unit_vector(0),
+                vectors: None,
+                text: Some("warning".into()),
+                attributes,
+            }],
+        )
+        .await
+        .expect("upsert");
+
+    let err = manager
+        .facet(&ns, Some("section =".into()), &["section".into()], 10)
+        .await
+        .expect_err("malformed facet filter must fail");
+    assert!(matches!(err, FirnflowError::InvalidRequest(_)));
+
+    let err = manager
+        .facet(&ns, None, &["vector".into()], 10)
+        .await
+        .expect_err("vector is not facetable");
+    assert!(matches!(err, FirnflowError::InvalidRequest(_)));
+}
+
+#[tokio::test]
+async fn local_fs_facet_empty_namespace_returns_empty() {
+    let dir = TempDir::new().unwrap();
+    let manager = local_manager(&dir);
+    let ns = NamespaceId::new("embedded-facet-empty").unwrap();
+
+    let result = manager
+        .facet(&ns, None, &["id".into()], 10)
+        .await
+        .expect("empty facet");
+    assert!(result.facets.is_empty());
+}
+
+#[tokio::test]
+async fn local_fs_query_filter_zero_match_and_malformed_predicate() {
+    let dir = TempDir::new().unwrap();
+    let manager = local_manager(&dir);
+    let ns = NamespaceId::new("embedded-filter-errors").unwrap();
+
+    let rows: Vec<UpsertRow> = vec![(1u64, unit_vector(0)).into(), (2u64, unit_vector(1)).into()];
+    manager.upsert(&ns, rows).await.expect("local upsert");
+
+    let empty = manager
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            10,
+            None,
+            None,
+            Some("id > 99".into()),
+            false,
+        )
+        .await
+        .expect("zero-match filtered query");
+    assert!(empty.results.is_empty());
+
+    let err = manager
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            10,
+            None,
+            None,
+            Some("id =".into()),
+            false,
+        )
+        .await
+        .expect_err("malformed filter should fail");
+    match err {
+        FirnflowError::InvalidRequest(msg) => assert!(msg.contains("filter"), "{msg}"),
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
 }
 
 #[tokio::test]
