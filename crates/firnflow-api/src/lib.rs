@@ -6,6 +6,7 @@
 //! their own `AppState` (via `tests/common`) and driving [`router`]
 //! through `tower::ServiceExt::oneshot`.
 
+pub mod attributes;
 pub mod auth;
 pub mod config;
 pub mod error;
@@ -45,7 +46,8 @@ pub use state::{AppState, build_state};
 ///   `ServiceBuilder` so the limiter sees the `Principal` extension
 ///   that auth attaches.
 /// * **Admin** — `delete`, `index`, `fts-index`, `scalar-index`,
-///   `compact`. Same shape as read/write but with `require_admin`.
+///   `attributes`, `compact`. Same shape as read/write but with
+///   `require_admin`.
 ///
 /// The optional pre-auth IP limiter wraps the merged protected
 /// router as the outermost layer — it intentionally runs before
@@ -112,6 +114,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/ns/{namespace}/scalar-index",
             post(handlers::create_scalar_index),
+        )
+        .route(
+            "/ns/{namespace}/attributes",
+            post(handlers::declare_attributes),
         )
         .route("/ns/{namespace}/compact", post(handlers::compact));
     let admin = match principal_layer {

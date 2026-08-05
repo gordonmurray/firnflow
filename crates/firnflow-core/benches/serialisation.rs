@@ -41,6 +41,10 @@ fn make_result_set(n: usize) -> QueryResultSet {
             ),
             text: None,
             ingested_at_micros: Some(1_700_000_000_000_000 + i as i64),
+            // The vector dominates the payload by orders of magnitude,
+            // so the baseline this benchmark tracks stays on the
+            // no-attributes shape.
+            attributes: Default::default(),
         })
         .collect();
     QueryResultSet {

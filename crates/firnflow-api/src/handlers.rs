@@ -4,6 +4,7 @@
 //! * `POST   /ns/{namespace}/upsert`
 //! * `POST   /ns/{namespace}/import`
 //! * `POST   /ns/{namespace}/query`
+//! * `POST   /ns/{namespace}/attributes`
 //! * `GET    /ns/{namespace}/list`
 //! * `GET    /ns/{namespace}`
 //! * `DELETE /ns/{namespace}`
@@ -31,10 +32,12 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
 use firnflow_core::{
-    FirnflowError, IndexRequest, LIST_MAX_LIMIT, ListOrder, ListPage, NamespaceId, NamespaceInfo,
-    QueryRequest, UpsertRow as CoreUpsertRow, decode_list_cursor, validate_arrow_import_schema,
+    AttributeColumn, FirnflowError, IndexRequest, LIST_MAX_LIMIT, ListOrder, ListRow, NamespaceId,
+    NamespaceInfo, QueryRequest, QueryResult, QueryResultSet, UpsertRow as CoreUpsertRow,
+    decode_list_cursor, validate_arrow_import_schema,
 };
 
+use crate::attributes::{attributes_from_json, attributes_to_json};
 use crate::error::ApiError;
 use crate::operations::{OperationKind, OperationRecord, OperationStatus};
 use crate::state::AppState;
@@ -58,9 +61,9 @@ pub struct DeleteResponse {
 /// keeps the historical default of `_ingested_at`.
 #[derive(Debug, Deserialize)]
 pub struct ScalarIndexRequest {
-    /// Column to index: `id` (write-path merge-insert lookups) or
-    /// `_ingested_at` (the `/list` ordering column). Defaults to
-    /// `_ingested_at`.
+    /// Column to index: `id` (write-path merge-insert lookups),
+    /// `_ingested_at` (the `/list` ordering column), or a declared
+    /// attribute column. Defaults to `_ingested_at`.
     #[serde(default = "default_scalar_index_column")]
     pub column: String,
 }
@@ -136,12 +139,120 @@ pub struct UpsertRow {
     /// Optional text payload for full-text search.
     #[serde(default)]
     pub text: Option<String>,
+    /// Values for the namespace's declared attribute columns, as a
+    /// flat object of scalars: `{"section": "warnings", "year": 2024}`.
+    /// Every name must already be declared through
+    /// `POST /ns/{namespace}/attributes`; an undeclared one is a 400
+    /// rather than a silently dropped field. Omitting a declared
+    /// column, or sending it as `null`, writes a null, and the name
+    /// is checked either way, so clearing a value through a
+    /// misspelled column is a 400 rather than a write that does
+    /// nothing.
+    #[serde(default)]
+    pub attributes: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Body of `POST /ns/{namespace}/upsert`.
 #[derive(Debug, Deserialize)]
 pub struct UpsertRequest {
     pub rows: Vec<UpsertRow>,
+}
+
+/// Body of `POST /ns/{namespace}/attributes`: the attribute columns
+/// the caller wants the namespace to carry.
+#[derive(Debug, Deserialize)]
+pub struct AttributesRequest {
+    /// Columns to declare. Each is a `name` and a `type` of
+    /// `string`, `int`, `float`, or `bool`. Re-declaring a column
+    /// with the type it already has is accepted and changes nothing,
+    /// so a caller can send its full intended schema every time.
+    pub attributes: Vec<AttributeColumn>,
+}
+
+/// Body of a successful attribute declaration: the namespace's full
+/// attribute set, including columns declared by earlier calls.
+#[derive(Debug, Serialize)]
+pub struct AttributesResponse {
+    /// Every attribute column on the namespace, in table order.
+    pub attributes: Vec<AttributeColumn>,
+}
+
+/// One hit in a query response.
+///
+/// Mirrors [`QueryResult`] with the attribute values rendered as bare
+/// JSON scalars rather than the tagged form the result cache stores.
+#[derive(Debug, Serialize)]
+pub struct QueryHit {
+    pub id: u64,
+    pub score: f32,
+    pub vector: Option<Vec<f32>>,
+    pub text: Option<String>,
+    pub ingested_at_micros: Option<i64>,
+    /// Declared attribute values for this row. Omitted when the row
+    /// has none, so a namespace without attributes keeps exactly the
+    /// response shape it had before they existed.
+    #[serde(skip_serializing_if = "serde_json::Map::is_empty")]
+    pub attributes: serde_json::Map<String, serde_json::Value>,
+}
+
+impl From<QueryResult> for QueryHit {
+    fn from(hit: QueryResult) -> Self {
+        Self {
+            id: hit.id,
+            score: hit.score,
+            vector: hit.vector,
+            text: hit.text,
+            ingested_at_micros: hit.ingested_at_micros,
+            attributes: attributes_to_json(&hit.attributes),
+        }
+    }
+}
+
+/// Body of `POST /ns/{namespace}/query`.
+#[derive(Debug, Serialize)]
+pub struct QueryResponse {
+    pub query_id: String,
+    pub results: Vec<QueryHit>,
+}
+
+impl From<QueryResultSet> for QueryResponse {
+    fn from(set: QueryResultSet) -> Self {
+        Self {
+            query_id: set.query_id,
+            results: set.results.into_iter().map(QueryHit::from).collect(),
+        }
+    }
+}
+
+/// One row in a list response, with attributes rendered as JSON
+/// scalars on the same terms as [`QueryHit`].
+#[derive(Debug, Serialize)]
+pub struct ListRowResponse {
+    pub id: u64,
+    pub vector: Vec<f32>,
+    pub text: Option<String>,
+    pub ingested_at_micros: i64,
+    #[serde(skip_serializing_if = "serde_json::Map::is_empty")]
+    pub attributes: serde_json::Map<String, serde_json::Value>,
+}
+
+impl From<ListRow> for ListRowResponse {
+    fn from(row: ListRow) -> Self {
+        Self {
+            id: row.id,
+            vector: row.vector,
+            text: row.text,
+            ingested_at_micros: row.ingested_at_micros,
+            attributes: attributes_to_json(&row.attributes),
+        }
+    }
+}
+
+/// Body of `GET /ns/{namespace}/list`.
+#[derive(Debug, Serialize)]
+pub struct ListPageResponse {
+    pub rows: Vec<ListRowResponse>,
+    pub next_cursor: Option<String>,
 }
 
 /// Body of a successful upsert response.
@@ -168,15 +279,44 @@ pub async fn upsert(
     let rows: Vec<CoreUpsertRow> = req
         .rows
         .into_iter()
-        .map(|r| CoreUpsertRow {
-            id: r.id,
-            vector: r.vector,
-            vectors: r.vectors,
-            text: r.text,
+        .map(|r| {
+            Ok(CoreUpsertRow {
+                id: r.id,
+                vector: r.vector,
+                vectors: r.vectors,
+                text: r.text,
+                attributes: attributes_from_json(r.id, r.attributes)?,
+            })
         })
-        .collect();
+        .collect::<Result<_, FirnflowError>>()?;
     state.service.upsert(&ns, rows).await?;
     Ok(Json(UpsertResponse { upserted: count }))
+}
+
+/// Declare typed attribute columns on a namespace.
+///
+/// Attribute columns are the caller's own scalar fields, and they are
+/// what a query `filter` can reference beyond `id` and
+/// `_ingested_at`. The namespace has to exist first, the same way an
+/// index build does: a namespace is created by its first write, so
+/// the order is write, declare, then write again with values.
+///
+/// Synchronous, unlike the index builders. Adding the columns is a
+/// single metadata commit that writes nulls into existing rows, not a
+/// pass over the data, so there is nothing worth a background task and
+/// a poll. Returns the namespace's full attribute set as it stands
+/// after the call.
+pub async fn declare_attributes(
+    State(state): State<AppState>,
+    Path(namespace): Path<String>,
+    Json(req): Json<AttributesRequest>,
+) -> Result<Json<AttributesResponse>, ApiError> {
+    let ns = NamespaceId::new(namespace)?;
+    let attributes = state
+        .service
+        .declare_attributes(&ns, &req.attributes)
+        .await?;
+    Ok(Json(AttributesResponse { attributes }))
 }
 
 /// Run a vector nearest-neighbour query through the cache-aside path.
@@ -193,7 +333,7 @@ pub async fn query(
         .is_some_and(|value| matches!(value, "1" | "true" | "yes"));
     let outcome = state.service.query_with_cache_source(&ns, &req).await?;
     let cache_source = outcome.cache_source.as_str();
-    let mut response = Json(outcome.result).into_response();
+    let mut response = Json(QueryResponse::from(outcome.result)).into_response();
     if include_cache_source {
         response.headers_mut().insert(
             CACHE_SOURCE_RESPONSE_HEADER,
@@ -415,9 +555,10 @@ pub async fn create_fts_index(
 /// (`{"column": "id"}`); with no body it defaults to `_ingested_at`,
 /// preserving the original no-body behaviour. Valid columns are `id`
 /// (write-path merge-insert lookups — the maintenance path for
-/// namespaces created before auto-indexing) and `_ingested_at` (the
-/// `/list` ordering column). An unsupported column is rejected with
-/// a synchronous `400` before any background work starts.
+/// namespaces created before auto-indexing), `_ingested_at` (the
+/// `/list` ordering column), and any attribute column the namespace
+/// has declared. An unsupported column is rejected with a synchronous
+/// `400` before any background work starts.
 pub async fn create_scalar_index(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
@@ -430,7 +571,13 @@ pub async fn create_scalar_index(
 
     // Reject an unsupported column up front so the caller gets a 400
     // rather than a 202 followed by a log-only background failure.
-    firnflow_core::validate_scalar_index_column(&column).map_err(ApiError::Core)?;
+    // Which columns are valid depends on what the namespace has
+    // declared, so this reads the namespace's schema rather than
+    // checking a fixed list.
+    state
+        .manager
+        .validate_scalar_index_column(&ns, &column)
+        .await?;
 
     let operation_id = state
         .operations
@@ -693,7 +840,7 @@ pub async fn list(
     State(state): State<AppState>,
     Path(namespace): Path<String>,
     Query(params): Query<ListParams>,
-) -> Result<Json<ListPage>, ApiError> {
+) -> Result<Json<ListPageResponse>, ApiError> {
     let ns = NamespaceId::new(namespace)?;
 
     // V1 only supports `_ingested_at`. User-column ordering is
@@ -734,7 +881,10 @@ pub async fn list(
     };
 
     let page = state.manager.list(&ns, limit, order, cursor).await?;
-    Ok(Json(page))
+    Ok(Json(ListPageResponse {
+        rows: page.rows.into_iter().map(ListRowResponse::from).collect(),
+        next_cursor: page.next_cursor,
+    }))
 }
 
 /// Return operational metadata for a namespace: vector kind and

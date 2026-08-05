@@ -177,6 +177,7 @@ Use `gs://...` rather than reaching for the GCS S3-interop endpoint. The interop
 *   **Instant Invalidation:** Cached results are keyed on the Lance table version, so a write advances the version and makes that namespace's stale results unreachable in $O(1)$ time, with no separate bookkeeping.
 *   **Optional Object Cache:** A byte-range cache on local NVMe beneath the storage engine. When enabled, the object-storage reads behind cold and novel queries are served from disk, not just exact-repeat queries. Off by default ([details](#what-the-cache-does-and-does-not-do)).
 *   **CAS Consistency:** Verified concurrency safety using the backend's conditional-write primitive (`If-None-Match: *` for S3-family backends, the generation precondition for native GCS) to prevent data loss when multiple writers fight for the same bucket.
+*   **Metadata Filtering:** A namespace can declare typed scalar columns (`section`, `tenant`, `language`, `published_year`) and every vector, full-text, or hybrid query can be scoped to a predicate over them. See [Metadata columns](#metadata-columns) below.
 *   **Late-Interaction Search:** Each namespace is either single-vector (one dense vector per row) or multivector (a bag of small vectors per row, scored via MaxSim). The multivector shape is what ColBERT, ColPali, and ColQwen2 produce, and is what compositional queries like *"a man with a logo on his shirt"* need to match each element independently. See [Multivector namespaces](#multivector-namespaces) below.
 *   **Compact Serialization:** Query results are serialized with `bincode`, with a path to `rkyv` if a workload needs zero-copy.
 *   **Operational Excellence:** Native Prometheus metrics tracking cache hit rates and backend request count (the primary signal for cost savings).
@@ -224,7 +225,7 @@ Hits carry the stored vector by default. Add `"include_vector": false` to the re
 
 Searching text needs an index first. Add `"text"` to a request and Firn scores it through the BM25 index, so on a namespace that has rows but no such index the request returns 400 pointing at `POST /ns/{ns}/fts-index`. That covers hybrid requests too, which fail rather than quietly ranking on the vector alone. A namespace that has never been written is the exception: with no table to index it answers every query shape with an empty 200, so a new deployment looks healthy until the first document lands. Once built, the index does not need rebuilding after every write: full-text queries still find later rows, by scanning the data files the index does not yet cover and merging those scores in with the indexed ones.
 
-Add `"filter": "id > 1000"` or an `_ingested_at` predicate to scope vector, full-text, or hybrid search to matching rows. Filters use the same DataFusion SQL predicate dialect as `/list` and are applied before nearest-neighbour ranking, so vector queries return up to `k` neighbours that satisfy the predicate.
+Add `"filter": "section = 'warnings'"` to scope vector, full-text, or hybrid search to matching rows. Filters use the same DataFusion SQL predicate dialect as `/list` and are applied before nearest-neighbour ranking, so vector queries return up to `k` neighbours that satisfy the predicate. A predicate can reference `id`, `_ingested_at`, and any [metadata column](#metadata-columns) the namespace has declared.
 
 A filtered request is cached by the exact text of its predicate. That is only safe when the predicate means the same thing every time it runs, so a filter calling a function whose result can move between two identical requests (`now()`, `current_timestamp`, `current_date`, `random()`) skips the result cache and always runs against the backend. Those queries stay correct at the cost of the cache's speedup; everything else keeps the fast path. The check plans the predicate rather than reading its text, so a column named `now` is still cached normally.
 
@@ -255,8 +256,9 @@ Firn is not intended to replace every search platform. OpenSearch and Elasticsea
 
 - The server assumes one authoritative process per bucket; multi-node coordination is not yet part of the deployment contract.
 - The API is pre-1.0 and may change as the search and metadata model develops.
-- `/import` is insert-only; use `/upsert` for idempotent updates.
-- Per-row deletion and arbitrary user-defined metadata columns are not yet part of the current API.
+- `/import` is insert-only; use `/upsert` for idempotent updates, and note that it writes nulls into [metadata columns](#metadata-columns) rather than carrying values.
+- Metadata columns are scalars: `string`, `int`, `float`, and `bool`. Lists, nested objects, and timestamps are not modelled, and neither are facet counts over a filtered set.
+- Per-row deletion is not yet part of the current API.
 - An IVF_PQ index is recommended for practical cold-query latency on large object-storage-backed namespaces; exact search remains available when recall matters more than latency.
 
 ## Authentication
@@ -266,7 +268,7 @@ Firn ships with optional bearer-token authentication on the REST API. Both keys 
 | Env var | Tier | Routes |
 | :--- | :--- | :--- |
 | `FIRNFLOW_API_KEY` | read/write | `upsert`, `query`, `list`, `warmup` |
-| `FIRNFLOW_ADMIN_API_KEY` | admin (destructive) | `delete`, `index`, `fts-index`, `scalar-index`, `compact` |
+| `FIRNFLOW_ADMIN_API_KEY` | admin (destructive) | `delete`, `index`, `fts-index`, `scalar-index`, `attributes`, `compact` |
 | `FIRNFLOW_METRICS_TOKEN` | metrics | `/metrics` (otherwise public) |
 
 Header format on every protected request: `Authorization: Bearer <token>` (generate a key with e.g. `openssl rand -hex 32`).
@@ -284,13 +286,14 @@ If `FIRNFLOW_ADMIN_API_KEY` is unset, the read/write key authorises admin routes
 | `/ns/{ns}` | `GET` | read/write | Namespace metadata (row count, fragment count, indexes, table version); 404 if it has no data yet |
 | `/ns/{ns}` | `DELETE` | admin | Removes all data (object storage + cache) for a namespace |
 | `/ns/{ns}/upsert` | `POST` | read/write | Insert or update vectors and data (latest-write-wins by `id`) |
+| `/ns/{ns}/attributes` | `POST` | admin | Declare typed metadata columns to filter on. Additive and idempotent; returns the namespace's full set |
 | `/ns/{ns}/import` | `POST` | read/write | Bulk-ingest an Arrow IPC stream (binary, insert-only, async 202). For large first loads; bypasses the JSON body limit |
 | `/ns/{ns}/query` | `POST` | read/write | Vector, FTS, or hybrid search |
 | `/ns/{ns}/list` | `GET` | read/write | Cursor-paginated list ordered by `_ingested_at` |
 | `/ns/{ns}/warmup` | `POST` | read/write | Non-blocking cache pre-warm hint |
 | `/ns/{ns}/index` | `POST` | admin | Build IVF_PQ vector index (async, returns 202) |
 | `/ns/{ns}/fts-index` | `POST` | admin | Build BM25 full-text search index (async, returns 202) |
-| `/ns/{ns}/scalar-index` | `POST` | admin | Build a BTree index on a column (async, returns 202). Optional body `{"column": "id"}` for write-path merge-insert lookups; defaults to `_ingested_at` to accelerate `/list` |
+| `/ns/{ns}/scalar-index` | `POST` | admin | Build a BTree index on a column (async, returns 202). Optional body `{"column": "id"}` for write-path merge-insert lookups, or a declared metadata column to speed up filters over it; defaults to `_ingested_at` to accelerate `/list` |
 | `/ns/{ns}/compact` | `POST` | admin | Compact and prune data files (async, returns 202) |
 | `/operations/{id}` | `GET` | read/write | Status of a background operation by the `operation_id` from its 202; 404 if unknown or evicted |
 
@@ -316,6 +319,58 @@ A recommended recipe for a first load:
 4. **Query.**
 
 If you stay on the JSON `/upsert` path (smaller loads, or idempotent updates), size batches up toward `FIRNFLOW_MAX_BODY_BYTES` rather than sending rows a handful at a time, and build indexes after the load rather than during it.
+
+## Metadata columns
+
+A query `filter` is only as useful as the columns it has to work with. Out of the box those are `id` and `_ingested_at`, which covers time windows and little else. Declaring metadata columns gives a namespace the fields a real search application filters on: section, tenant, language, category, status, permissions.
+
+Columns are declared, not inferred from the rows that carry them. A column whose first value is `2024` looks like an integer right up until someone sends `2024.5`, and a column whose first value is absent has no type at all, so inference turns a schema decision into a write that fails later on data that looks fine. Declaring means the engine can reject the mistake at the point the caller made it.
+
+The namespace has to exist first, the same as for an index build, so the order is write, declare, write again with values:
+
+```bash
+# 1. The first write creates the namespace.
+curl -X POST http://localhost:3000/ns/demo/upsert \
+     -H 'Content-Type: application/json' \
+     -d '{"rows": [{"id": 1, "vector": [1.0, 0.0, 0.0, 0.0]}]}'
+
+# 2. Declare the columns.
+curl -X POST http://localhost:3000/ns/demo/attributes \
+     -H 'Content-Type: application/json' \
+     -d '{"attributes": [
+           {"name": "section", "type": "string"},
+           {"name": "year",    "type": "int"},
+           {"name": "archived","type": "bool"}
+         ]}'
+
+# 3. Write values, then filter on them.
+curl -X POST http://localhost:3000/ns/demo/upsert \
+     -H 'Content-Type: application/json' \
+     -d '{"rows": [{"id": 1, "vector": [1.0, 0.0, 0.0, 0.0],
+                    "attributes": {"section": "warnings", "year": 2024, "archived": false}}]}'
+
+curl -X POST http://localhost:3000/ns/demo/query \
+     -H 'Content-Type: application/json' \
+     -d '{"vector": [1.0, 0.0, 0.0, 0.0], "k": 20,
+          "filter": "section = '\''warnings'\'' AND year >= 2024"}'
+```
+
+Types are `string`, `int`, `float`, and `bool`. Names match `[a-z][a-z0-9_]*`: the predicate dialect is SQL, which lowercases an unquoted identifier while parsing, so a column named `Section` could only be reached from a filter as `"Section"` with the quotes. Up to 32 columns per namespace.
+
+Declaring is additive and idempotent. Sending a column that already exists with the type it already has changes nothing and commits nothing, so a client can send its whole intended schema on every startup. Sending it with a *different* type is rejected, because the values already stored under the old type would have to be reinterpreted or dropped, which is not something to do behind a call that otherwise only adds. Adding a genuinely new column writes nulls into the rows that already exist and is a single metadata commit, not a pass over the data.
+
+Every column is nullable. A row that omits an attribute has a null in it, and the response leaves the key out rather than reporting it as null. Sending a name with a JSON `null` also writes a null, and the name is still checked against the declaration either way, so clearing a value through a misspelled column is a 400 rather than a request that reports success and does nothing. Because `/upsert` replaces a matched row in full, re-sending a row without its attributes clears them, exactly as it does for `text`.
+
+One coercion applies on the way in: JSON has a single number type, so an integer sent to a `float` column is widened. It is rejected rather than rounded when the value is too large for a `float` to hold exactly, since a value that comes back different from the one that was sent would quietly stop matching an equality filter on it. A number with a fractional part sent to an `int` column is rejected for the same reason, and so is an integer literal outside the signed 64-bit range, whichever column it was meant for. Write that one as a float (`1.8e19`) if the approximation is what you want.
+
+Values come back on `/query` hits and `/list` rows as bare JSON scalars:
+
+```json
+{"id": 1, "score": 0.0, "text": null,
+ "attributes": {"section": "warnings", "year": 2024, "archived": false}}
+```
+
+Two things are worth knowing before building on this. `/import` does not carry attribute values: a bulk-loaded row lands with nulls in every metadata column, so a corpus that needs metadata has to come in through `/upsert` for now. And filtering is a scan over the matching rows unless the column is indexed, so `POST /ns/{ns}/scalar-index` with `{"column": "section"}` is worth building on any column a workload filters by regularly.
 
 ## Multivector namespaces
 

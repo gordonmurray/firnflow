@@ -52,7 +52,7 @@
     <p>When <code>FIRNFLOW_API_KEY</code> is configured, every protected endpoint requires <code>Authorization: Bearer &lt;token&gt;</code>. Two tiers exist:</p>
     <ul>
       <li><strong>Read/write</strong> (<code>FIRNFLOW_API_KEY</code>) — <code>upsert</code>, <code>query</code>, <code>list</code>, <code>warmup</code>, <code>GET /ns/{namespace}</code>, and <code>GET /operations/{id}</code>.</li>
-      <li><strong>Admin</strong> (<code>FIRNFLOW_ADMIN_API_KEY</code>) — <code>delete</code>, <code>index</code>, <code>fts-index</code>, <code>scalar-index</code>, <code>compact</code>. The admin key also satisfies read/write routes. If no admin key is configured, the read/write key authorises admin routes too (single-key fallback).</li>
+      <li><strong>Admin</strong> (<code>FIRNFLOW_ADMIN_API_KEY</code>): <code>delete</code>, <code>index</code>, <code>fts-index</code>, <code>scalar-index</code>, <code>attributes</code>, <code>compact</code>. The admin key also satisfies read/write routes. If no admin key is configured, the read/write key authorises admin routes too (single-key fallback).</li>
     </ul>
     <p><code>/health</code> is always public. <code>/metrics</code> is public unless <code>FIRNFLOW_METRICS_TOKEN</code> is set, in which case the same Bearer header is required. Token comparisons are constant-time (<code>subtle::ConstantTimeEq</code>). See <a href="configuration.html#authentication">configuration</a> for the full env-var list, including the optional <code>FIRNFLOW_RATE_LIMIT_RPS</code> / <code>FIRNFLOW_PREAUTH_IP_LIMIT_RPS</code> rate-limit knobs.</p>
     <p>Rejection responses on protected endpoints:</p>
@@ -112,7 +112,7 @@
       </div>
       <div class="endpoint-body">
         <p>Inserts or updates rows in the namespace's Lance table, keyed by <code>id</code>. The vector dimension and the vector kind (single-vector or multivector) are inferred from the first upsert and enforced on subsequent calls. After a successful write, all cached query results for this namespace are invalidated.</p>
-        <p>Upsert is latest-write-wins: re-sending a row whose <code>id</code> already exists replaces the stored row in full (vector, text, and the <code>_ingested_at</code> timestamp), so replaying a request and updating a document are both safe. A row with a new <code>id</code> is inserted. Because <code>_ingested_at</code> is rewritten on update, it reflects the most recent write to a row rather than its first insert. Duplicate ids within a single request are rejected with <code>400</code>.</p>
+        <p>Upsert is latest-write-wins: re-sending a row whose <code>id</code> already exists replaces the stored row in full (vector, text, attribute values, and the <code>_ingested_at</code> timestamp), so replaying a request and updating a document are both safe. Replacing in full means a row re-sent without its attributes comes back without them. A row with a new <code>id</code> is inserted. Because <code>_ingested_at</code> is rewritten on update, it reflects the most recent write to a row rather than its first insert. Duplicate ids within a single request are rejected with <code>400</code>.</p>
         <p>The first write to a namespace builds a BTree index on <code>id</code> automatically, so the per-batch merge that matches incoming ids against stored rows uses the index instead of scanning every data file. For a large first load, see the recommended load/compact/index recipe in the README; for namespaces created before this behaviour existed, build the index once via <code>POST /ns/{namespace}/scalar-index</code> with <code>{"column": "id"}</code>.</p>
         <div class="callout callout-warning">
           <div class="callout-title">Upgrade note</div>
@@ -135,6 +135,7 @@
             <tr><td><code>rows[].vector</code></td><td>float32[]</td><td>One of</td><td>Single dense vector (single-vector namespaces). Length must match the namespace dimension.</td></tr>
             <tr><td><code>rows[].vectors</code></td><td>float32[][]</td><td>One of</td><td>Bag of equal-length sub-vectors (multivector namespaces). Each inner vector must match the namespace's inner sub-vector dimension; outer list length is the per-row sub-vector count.</td></tr>
             <tr><td><code>rows[].text</code></td><td>string</td><td>No</td><td>Text payload for full-text search</td></tr>
+            <tr><td><code>rows[].attributes</code></td><td>object</td><td>No</td><td>Values for the namespace's declared metadata columns, as a flat object of scalars. Every name must already be declared via <code>POST /ns/{namespace}/attributes</code>; an undeclared name returns 400, whether or not it carries a value, so clearing a value through a misspelled column is an error rather than a write that reports success and does nothing. An omitted or <code>null</code> value writes a null. An integer sent to a <code>float</code> column is widened, unless it is too large for a <code>float</code> to hold exactly, in which case it is rejected rather than rounded; an integer literal outside the signed 64-bit range is rejected outright, and has to be written as a float if the approximation is what the caller wants.</td></tr>
           </tbody>
         </table>
 
@@ -170,7 +171,7 @@
 
         <h4>Errors</h4>
         <ul>
-          <li><code>400</code> — invalid namespace name; vector dimension mismatch; payload shape mismatch (e.g. <code>vector</code> on a multivector namespace or vice versa); both <code>vector</code> and <code>vectors</code> set on the same row; empty inner sub-vector; mixed inner sub-vector dim within one row</li>
+          <li><code>400</code>: invalid namespace name; vector dimension mismatch; payload shape mismatch (e.g. <code>vector</code> on a multivector namespace or vice versa); both <code>vector</code> and <code>vectors</code> set on the same row; empty inner sub-vector; mixed inner sub-vector dim within one row; an undeclared attribute name, a value whose type does not match its declared column, or an attribute value that is not a scalar</li>
           <li><code>500</code> — object-storage write failure (client gets generic error; full details logged server-side)</li>
         </ul>
       </div>
@@ -222,6 +223,76 @@ curl -X POST http://localhost:3000/ns/demo/import \
       </div>
     </div>
 
+    <!-- POST /ns/{ns}/attributes -->
+    <div class="endpoint">
+      <div class="endpoint-header" aria-expanded="true">
+        <span class="method method-post">POST</span>
+        <span class="endpoint-path">/ns/{namespace}/attributes</span>
+        <span class="endpoint-desc">Declare typed metadata columns</span>
+      </div>
+      <div class="endpoint-body">
+        <p>Declares the scalar metadata columns a namespace carries. Out of the box a query <code>filter</code> can only reference <code>id</code> and <code>_ingested_at</code>; declared columns are the caller's own fields (section, tenant, language, category, status) and are what makes filtered retrieval useful.</p>
+        <p>Columns are declared rather than inferred from the rows that carry them. A column whose first value is <code>2024</code> looks like an integer until someone sends <code>2024.5</code>, and a column whose first value is absent has no type at all, so inference defers a schema decision to a write that fails later on data that looks fine.</p>
+        <p>The namespace must already exist, the same precondition the index builders have: a namespace is created by its first write, so the order is write, declare, then write again with values. Unlike the index builders this endpoint is synchronous, because adding the columns is a single metadata commit that writes nulls into existing rows rather than a pass over the data.</p>
+
+        <h4>Request body</h4>
+        <table>
+          <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>attributes</code></td><td>array</td><td>Yes</td><td>Columns to declare; at least one</td></tr>
+            <tr><td><code>attributes[].name</code></td><td>string</td><td>Yes</td><td>Column name, matching <code>[a-z][a-z0-9_]*</code> up to 64 characters. Lowercase because the predicate dialect is SQL, which lowercases an unquoted identifier while parsing, so a column named <code>Section</code> could only be reached from a filter as <code>"Section"</code> with the quotes. <code>id</code>, <code>vector</code>, <code>vectors</code>, <code>text</code>, and any leading-underscore name are reserved by the engine.</td></tr>
+            <tr><td><code>attributes[].type</code></td><td>string</td><td>Yes</td><td>One of <code>string</code>, <code>int</code>, <code>float</code>, <code>bool</code></td></tr>
+          </tbody>
+        </table>
+        <p>A namespace holds at most 32 attribute columns.</p>
+
+        <h4>Response (200)</h4>
+        <table>
+          <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>attributes</code></td><td>array</td><td>Every column on the namespace after the call, including ones declared earlier, in table order</td></tr>
+          </tbody>
+        </table>
+
+        <h4>Example</h4>
+        <pre><code>curl -X POST http://localhost:3000/ns/demo/attributes \
+     -H 'Content-Type: application/json' \
+     -d '{"attributes": [
+           {"name": "section", "type": "string"},
+           {"name": "year",    "type": "int"},
+           {"name": "archived","type": "bool"}
+         ]}'</code></pre>
+        <pre><code>{
+  "attributes": [
+    {"name": "section", "type": "string"},
+    {"name": "year", "type": "int"},
+    {"name": "archived", "type": "bool"}
+  ]
+}</code></pre>
+
+        <h4>Status codes</h4>
+        <table>
+          <thead><tr><th>Code</th><th>When</th></tr></thead>
+          <tbody>
+            <tr><td>200</td><td>Success, including a declaration that added nothing</td></tr>
+            <tr><td>400</td><td>Namespace has no data yet; illegal or reserved name; unknown type; duplicate name in one request; a column redeclared with a different type; more than 32 columns</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout callout-info">
+          <div class="callout-title">Additive and idempotent</div>
+          <p>Re-declaring a column with the type it already has is accepted and commits nothing, so a client can send its whole intended schema on every startup without churning the table version the result cache keys on. Re-declaring one with a <em>different</em> type is rejected: the values already stored under the old type would have to be reinterpreted or dropped, which is not something to do behind a call that otherwise only adds. There is no drop or rename.</p>
+          <p>Every column is nullable. Rows written before a column was declared hold a null in it, and because <code>/upsert</code> replaces a matched row in full, re-sending a row without its attributes clears them.</p>
+          <p>There is no schema read on the write path to check a name against, so a value for a column that has not been declared is rejected at the write rather than dropped. That applies to a JSON <code>null</code> too: it writes the same null an omitted name would, but naming a column that does not exist is still an error.</p>
+        </div>
+
+        <div class="callout callout-warning">
+          <div class="callout-title">Bulk import does not carry values</div>
+          <code>POST /ns/{namespace}/import</code> writes nulls into every metadata column, so a corpus that needs metadata has to be written through <code>/upsert</code>. A bulk-loaded row will not match a predicate over an attribute column until it is rewritten.
+        </div>
+      </div>
+    </div>
+
     <!-- POST /ns/{ns}/query -->
     <div class="endpoint">
       <div class="endpoint-header" aria-expanded="true">
@@ -253,7 +324,7 @@ curl -X POST http://localhost:3000/ns/demo/import \
             <tr><td><code>k</code></td><td>integer</td><td>Yes</td><td>Number of results to return</td></tr>
             <tr><td><code>nprobes</code></td><td>integer</td><td>No</td><td>IVF partitions to probe (default 20). Higher values trade latency for recall.</td></tr>
             <tr><td><code>text</code></td><td>string</td><td>No*</td><td>Text query for full-text or hybrid search</td></tr>
-            <tr><td><code>filter</code></td><td>string</td><td>No</td><td>DataFusion SQL predicate applied before vector ranking or FTS scoring. Uses the same predicate dialect as <code>/list</code>; examples include <code>id &gt; 1000</code> and predicates over <code>_ingested_at</code>. For vector search this is a prefilter: the response contains up to <code>k</code> neighbours satisfying the predicate, not a post-filtered top-k. Malformed predicates return 400. A filtered request is cached by the exact text of its predicate, so a predicate calling a function whose result can change between two identical requests (<code>now()</code>, <code>current_timestamp</code>, <code>current_date</code>, <code>random()</code>) bypasses the result cache and always runs against the backend — correct, but without the cache's speedup. The predicate is planned rather than pattern-matched, so a column named <code>now</code> still caches normally. To filter on recency <em>and</em> keep the cache, pass a fixed bound computed by the client instead of <code>now()</code>.</td></tr>
+            <tr><td><code>filter</code></td><td>string</td><td>No</td><td>DataFusion SQL predicate applied before vector ranking or FTS scoring. Uses the same predicate dialect as <code>/list</code>. A predicate can reference <code>id</code>, <code>_ingested_at</code>, and any metadata column the namespace has declared, so <code>id &gt; 1000</code>, a time window over <code>_ingested_at</code>, and <code>section = 'warnings' AND year &gt;= 2024</code> are all valid. A name that is not a column on this namespace returns 400. For vector search this is a prefilter: the response contains up to <code>k</code> neighbours satisfying the predicate, not a post-filtered top-k. Malformed predicates return 400. A filtered request is cached by the exact text of its predicate, so a predicate calling a function whose result can change between two identical requests (<code>now()</code>, <code>current_timestamp</code>, <code>current_date</code>, <code>random()</code>) bypasses the result cache and always runs against the backend, correct but without the cache's speedup. The predicate is planned rather than pattern-matched, so a column named <code>now</code> still caches normally. To filter on recency <em>and</em> keep the cache, pass a fixed bound computed by the client instead of <code>now()</code>.</td></tr>
             <tr><td><code>include_vector</code></td><td>bool</td><td>No</td><td>Whether result rows carry the stored vector (default <code>true</code>). Set <code>false</code> when you only need <code>id</code>/<code>score</code>/<code>text</code> — the vector column is dropped from the returned rows, so the response and the cached result shrink, and the object-storage read for those rows' vectors is avoided. At dim=1536 each hit carries ~6&nbsp;KiB of raw vector data, so a 100-hit response drops by roughly 600&nbsp;KiB. This is response projection, not a scan optimisation: Lance still reads whatever it needs to score the query, so an unindexed flat scan reads the vectors regardless.</td></tr>
             <tr><td><code>semantic_cache</code></td><td>object</td><td>No</td><td>Opt-in semantic-cache controls. See <em>Semantic cache</em> below. Omitting the field preserves the legacy exact-cache-only behaviour.</td></tr>
           </tbody>
@@ -301,6 +372,7 @@ curl -X POST http://localhost:3000/ns/demo/import \
             <tr><td><code>results[].vector</code></td><td>float32[]?</td><td>The stored vector for single-vector hits. <code>null</code> when the request set <code>include_vector: false</code>, and always <code>null</code> for multivector hits — the bag is intentionally not echoed.</td></tr>
             <tr><td><code>results[].text</code></td><td>string?</td><td>The stored text (null if none)</td></tr>
             <tr><td><code>results[].ingested_at_micros</code></td><td>i64?</td><td>Server-side microsecond timestamp the row was written — the same value <code>/list</code> reports. <code>null</code> on namespaces created before the timestamp column existed.</td></tr>
+            <tr><td><code>results[].attributes</code></td><td>object</td><td>The row's declared metadata values as bare JSON scalars, e.g. <code>{"section": "warnings", "year": 2024}</code>. A column the row left null is left out of the object, and the field itself is omitted when the row has no values, so a namespace with no declared columns keeps the response shape it had before.</td></tr>
           </tbody>
         </table>
 
@@ -319,6 +391,15 @@ curl -X POST http://localhost:3000/ns/demo/import \
         <pre><code>curl -X POST http://localhost:3000/ns/demo/query \
   -H 'Content-Type: application/json' \
   -d '{"text": "search query terms", "k": 10}'</code></pre>
+
+        <p>Metadata-filtered search:</p>
+        <pre><code>curl -X POST http://localhost:3000/ns/demo/query \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "vector": [1.0, 0.0, 0.0, 0.0],
+    "k": 20,
+    "filter": "section = '"'"'warnings'"'"' AND year >= 2024"
+  }'</code></pre>
 
         <p>Hybrid search (single-vector + FTS):</p>
         <pre><code>curl -X POST http://localhost:3000/ns/demo/query \
@@ -363,6 +444,7 @@ curl -X POST http://localhost:3000/ns/demo/import \
             <tr><td><code>rows[].vector</code></td><td>float32[]</td><td>The stored vector</td></tr>
             <tr><td><code>rows[].text</code></td><td>string?</td><td>The stored text (null if none)</td></tr>
             <tr><td><code>rows[].ingested_at_micros</code></td><td>i64</td><td>Server-side microsecond timestamp of the most recent write to the row (a re-upsert of the same id advances it)</td></tr>
+            <tr><td><code>rows[].attributes</code></td><td>object</td><td>The row's declared metadata values as bare JSON scalars, on the same terms as the <code>/query</code> field of the same name</td></tr>
             <tr><td><code>next_cursor</code></td><td>string?</td><td>Pass verbatim as <code>?cursor=</code> on the next call; <code>null</code> on the final page</td></tr>
           </tbody>
         </table>
@@ -410,6 +492,7 @@ curl -X POST http://localhost:3000/ns/demo/import \
             <tr><td><code>has_fts_index</code></td><td>bool</td><td>Whether a BM25 full-text index is built</td></tr>
             <tr><td><code>has_scalar_index</code></td><td>bool</td><td>Whether a BTree / bitmap / label-list scalar index is built</td></tr>
             <tr><td><code>table_version</code></td><td>u64</td><td>Current Lance table version; advances on every commit</td></tr>
+            <tr><td><code>attributes</code></td><td>array</td><td>Metadata columns declared on this namespace, each <code>{"name", "type"}</code>, in table order. These are the names a query <code>filter</code> can reference beyond <code>id</code> and <code>_ingested_at</code>.</td></tr>
           </tbody>
         </table>
 
@@ -433,7 +516,11 @@ curl -X POST http://localhost:3000/ns/demo/import \
   "has_vector_index": true,
   "has_fts_index": false,
   "has_scalar_index": false,
-  "table_version": 42
+  "table_version": 42,
+  "attributes": [
+    {"name": "section", "type": "string"},
+    {"name": "year", "type": "int"}
+  ]
 }</code></pre>
       </div>
     </div>
@@ -601,7 +688,7 @@ curl -X POST http://localhost:3000/ns/demo/import \
         <p>Builds a BTree scalar index on a namespace column. On <code>_ingested_at</code> (the default) the index lets <code>/list</code> cursor pages do an index range scan instead of a full-fragment scan, and the leading <code>ORDER BY _ingested_at</code> short-circuits the in-memory sort step. On <code>id</code> it speeds up the per-batch merge-insert lookup the write path runs (see <code>/upsert</code>). Returns <code>202 Accepted</code>.</p>
 
         <h4>Request body</h4>
-        <p>Optional. <code>{"column": "id"}</code> indexes the row id; an empty body defaults to <code>_ingested_at</code>. Valid columns are <code>id</code> and <code>_ingested_at</code>; any other value returns <code>400</code> before the background build starts. A namespace's first write already builds the <code>id</code> index automatically, so this is the maintenance path for namespaces created before that behaviour existed.</p>
+        <p>Optional. <code>{"column": "id"}</code> indexes the row id; an empty body defaults to <code>_ingested_at</code>. Valid columns are <code>id</code>, <code>_ingested_at</code>, and any metadata column the namespace has declared; any other value returns <code>400</code> before the background build starts. On a metadata column the index is what stops a filter over it scanning the matching rows, so it is worth building on any column a workload filters by regularly. A namespace's first write already builds the <code>id</code> index automatically, so this is the maintenance path for namespaces created before that behaviour existed.</p>
 
         <h4>Response (202)</h4>
         <pre><code>{
@@ -617,7 +704,12 @@ curl -X POST http://localhost:3000/ns/demo/import \
 # index the row id (write-path maintenance path)
 curl -X POST http://localhost:3000/ns/demo/scalar-index \
      -H 'Content-Type: application/json' \
-     -d '{"column": "id"}'</code></pre>
+     -d '{"column": "id"}'
+
+# index a declared metadata column so filters over it use the index
+curl -X POST http://localhost:3000/ns/demo/scalar-index \
+     -H 'Content-Type: application/json' \
+     -d '{"column": "section"}'</code></pre>
 
         <div class="callout callout-info">
           <div class="callout-title">Idempotent and self-maintaining</div>

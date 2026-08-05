@@ -83,6 +83,7 @@ fn multi(subs: Vec<Vec<f32>>) -> UpsertRow {
         vector: Vec::new(),
         vectors: Some(subs),
         text: None,
+        attributes: Default::default(),
     }
 }
 

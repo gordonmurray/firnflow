@@ -85,6 +85,7 @@ fn row(id: u64, vector: Vec<f32>, text: &str) -> UpsertRow {
         vector,
         vectors: None,
         text: Some(text.to_string()),
+        attributes: Default::default(),
     }
 }
 
@@ -236,6 +237,7 @@ async fn multivector_reupsert_replaces_not_appends() {
         vector: Vec::new(),
         vectors: Some(bag),
         text: None,
+        attributes: Default::default(),
     };
 
     manager

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Namespaces can carry typed metadata columns, and a query `filter` can reference them. `POST /ns/{namespace}/attributes` declares scalar columns (`{"name": "section", "type": "string"}`, types `string`, `int`, `float`, `bool`), `/upsert` rows carry values in an `attributes` object of bare JSON scalars, and `/query` hits and `/list` rows return them in the same shape. The `filter` field shipped in 0.9.3 with only `id` and `_ingested_at` to work against, which covers row ids and time windows and not much a search application actually filters by; this is the other half. Columns are declared rather than inferred from the rows that carry them, because a column whose first value is `2024` looks like an integer until someone sends `2024.5`, and a column whose first value is absent has no type at all, so inference turns a schema decision into a write that fails later on data that looks fine. Declaring is additive and idempotent: re-sending a column with the type it already has commits nothing, so a client can send its whole intended schema on every startup without churning the table version the cache keys on, while re-sending it with a different type is rejected. The namespace must already exist, the same precondition the index builders have, so the order is write, declare, write again with values. Names match `[a-z][a-z0-9_]*`, since the predicate dialect is SQL and SQL lowercases an unquoted identifier while parsing; up to 32 columns per namespace. `POST /ns/{namespace}/scalar-index` accepts a declared column, so a filter over it uses a BTree instead of scanning, and `GET /ns/{namespace}` reports the declared set. Part 2 of #84.
+
+### Changed
+- Every column is nullable, and `/upsert` continues to replace a matched row in full, so re-sending a row without its attributes clears them, the same way it already clears a `text` that is not resent. A JSON `null` writes the same null an omitted name would, and the name is checked against the declaration either way, so clearing a value through a misspelled column is a `400` rather than a request that reports success and writes nothing. An integer sent to a `float` column is widened, since JSON has one number type and `1` for a float column is not a mistake, but it is rejected rather than rounded when the value is too large for a `float` to hold exactly, and an integer literal outside the signed 64-bit range is rejected outright rather than quietly taken as the float it rounds to (write it as a float if that approximation is the intent).
+
+### Known limitations
+- `POST /ns/{namespace}/import` writes nulls into attribute columns. The Arrow stream schema does not carry attribute values yet, so a namespace with declared columns can still be bulk-loaded, but the loaded rows will not match a predicate over those columns until they are rewritten through `/upsert`.
+- The embedded Python package has no way to declare attribute columns or write values, so rows written through it leave them null.
+- Facet counts over a filtered set, requested on #84, are not part of this change.
+
 ## [0.9.5] - 2026-07-30
 
 ### Fixed

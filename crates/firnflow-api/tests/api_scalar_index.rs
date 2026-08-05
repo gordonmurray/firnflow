@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 mod common;
-use common::{test_state, test_state_offline, unique_namespace};
+use common::{test_state, test_state_local, test_state_offline, unique_namespace};
 
 async fn build_app_with_metrics() -> (axum::Router, tempfile::TempDir, Arc<CoreMetrics>) {
     let (state, tmp) = test_state().await;
@@ -265,31 +265,37 @@ async fn scalar_index_build_returns_202_and_list_still_works() {
 }
 
 /// The `column` parameter is validated synchronously, so an
-/// unsupported column returns `400` before any storage is touched —
-/// no MinIO required. Uses the offline state whose backend refuses
-/// connections, which the request never reaches.
+/// unsupported column returns `400` before the background build is
+/// spawned. Which columns are valid depends on what the namespace has
+/// declared, so this runs against local storage with a seeded
+/// namespace rather than the offline state.
 #[tokio::test]
 async fn scalar_index_rejects_unsupported_column() {
-    let (state, _tmp) = test_state_offline().await;
+    let (state, _tmp) = test_state_local().await;
     let app = router(state);
     let ns = unique_namespace("scalar-col-bad");
+    seed_namespace(&app, &ns, 1).await;
 
-    let (status, _) = post_json(
-        app,
-        format!("/ns/{ns}/scalar-index"),
-        json!({ "column": "vector" }),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "an unsupported scalar-index column must be rejected with 400"
-    );
+    for column in ["vector", "section"] {
+        let (status, body) = post_json(
+            app.clone(),
+            format!("/ns/{ns}/scalar-index"),
+            json!({ "column": column }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "column {column:?} must be rejected with 400: {body}"
+        );
+    }
 }
 
 /// A supported column (`id`) and the no-body default both return
 /// `202` synchronously — the build itself runs in the background, so
 /// the immediate response does not depend on a reachable backend.
+/// Both are engine-owned columns, which is what keeps their
+/// validation off the I/O path against the offline state.
 #[tokio::test]
 async fn scalar_index_accepts_id_and_default_columns() {
     let (state, _tmp) = test_state_offline().await;

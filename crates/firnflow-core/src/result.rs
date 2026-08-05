@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::attributes::{AttributeColumn, AttributeMap};
 use crate::vector::VectorKind;
 
 /// A single search hit.
@@ -42,6 +43,11 @@ pub struct QueryResult {
     /// `None` for namespaces created before the column existed.
     #[serde(default)]
     pub ingested_at_micros: Option<i64>,
+    /// The row's values for the namespace's declared attribute
+    /// columns. Empty when the namespace has none, and a column the
+    /// row left null is absent rather than present-and-null.
+    #[serde(default)]
+    pub attributes: AttributeMap,
 }
 
 /// A full query response: ranked hits plus an opaque tracing id.
@@ -84,6 +90,11 @@ pub struct ListRow {
     /// replaces the row and advances this value, so it reflects the
     /// latest write rather than the first insert.
     pub ingested_at_micros: i64,
+    /// The row's values for the namespace's declared attribute
+    /// columns, on the same terms as
+    /// [`QueryResult::attributes`](crate::QueryResult::attributes).
+    #[serde(default)]
+    pub attributes: AttributeMap,
 }
 
 /// A page of list results plus an opaque cursor for the next page.
@@ -128,4 +139,9 @@ pub struct NamespaceInfo {
     /// Current Lance table version. Advances on every commit; this is
     /// the value the result cache derives its generation from.
     pub table_version: u64,
+    /// Attribute columns declared on this namespace, in table order.
+    /// These are the names a query `filter` can reference beyond `id`
+    /// and `_ingested_at`.
+    #[serde(default)]
+    pub attributes: Vec<AttributeColumn>,
 }

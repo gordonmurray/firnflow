@@ -292,6 +292,10 @@ fn parse_documents(documents: &Bound<'_, PyList>) -> PyResult<Vec<UpsertRow>> {
             vector,
             vectors,
             text,
+            // Attribute columns are a REST-surface feature for now.
+            // The embedded package has no way to declare them, so
+            // every row it writes leaves them null.
+            attributes: Default::default(),
         });
     }
     Ok(rows)

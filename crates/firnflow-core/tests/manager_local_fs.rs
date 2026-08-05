@@ -87,18 +87,21 @@ async fn local_fs_fts_text_search() {
             vector: unit_vector(0),
             vectors: None,
             text: Some("the quick brown fox".into()),
+            attributes: Default::default(),
         },
         UpsertRow {
             id: 2,
             vector: unit_vector(1),
             vectors: None,
             text: Some("a lazy dog sleeps".into()),
+            attributes: Default::default(),
         },
         UpsertRow {
             id: 3,
             vector: unit_vector(2),
             vectors: None,
             text: Some("the fox runs fast".into()),
+            attributes: Default::default(),
         },
     ];
     manager.upsert(&ns, rows).await.expect("local upsert");
@@ -208,18 +211,21 @@ async fn local_fs_query_filter_narrows_fts_and_hybrid_results() {
             vector: unit_vector(0),
             vectors: None,
             text: Some("fox warning".into()),
+            attributes: Default::default(),
         },
         UpsertRow {
             id: 2,
             vector: unit_vector(1),
             vectors: None,
             text: Some("fox dosing".into()),
+            attributes: Default::default(),
         },
         UpsertRow {
             id: 3,
             vector: unit_vector(2),
             vectors: None,
             text: Some("dog warning".into()),
+            attributes: Default::default(),
         },
     ];
     manager.upsert(&ns, rows).await.expect("local upsert");
@@ -341,12 +347,14 @@ async fn local_fs_text_query_without_fts_index_is_a_bad_request() {
             vector: unit_vector(0),
             vectors: None,
             text: Some("the quick brown fox".into()),
+            attributes: Default::default(),
         },
         UpsertRow {
             id: 2,
             vector: unit_vector(1),
             vectors: None,
             text: Some("a lazy dog sleeps".into()),
+            attributes: Default::default(),
         },
     ];
     manager.upsert(&ns, rows).await.expect("local upsert");
@@ -498,6 +506,7 @@ async fn local_fs_fts_index_covers_rows_written_after_the_build() {
                 vector: unit_vector(0),
                 vectors: None,
                 text: Some("the quick brown fox".into()),
+                attributes: Default::default(),
             }],
         )
         .await
@@ -515,6 +524,7 @@ async fn local_fs_fts_index_covers_rows_written_after_the_build() {
                 vector: unit_vector(1),
                 vectors: None,
                 text: Some("a solitary aardvark".into()),
+                attributes: Default::default(),
             }],
         )
         .await

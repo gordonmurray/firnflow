@@ -22,6 +22,7 @@ use arrow_array::RecordBatchReader;
 use bincode::config;
 use serde::Serialize;
 
+use crate::attributes::AttributeColumn;
 use crate::cache::{NamespaceCache, QueryHash, SemanticCache, SemanticLookup};
 use crate::filter::{FilterCacheability, classify_filter};
 use crate::manager::{CompactResult, NamespaceManager, UpsertRow};
@@ -500,8 +501,30 @@ impl NamespaceService {
         Ok(())
     }
 
-    /// Build a BTree scalar index on `column` (v1: `_ingested_at`
-    /// only). Records `firnflow_index_build_duration_seconds{kind="scalar"}`
+    /// Declare typed attribute columns on a namespace, adding the ones
+    /// that are new. See
+    /// [`NamespaceManager::declare_attributes`](crate::NamespaceManager::declare_attributes)
+    /// for the semantics.
+    ///
+    /// The `add_columns` commit advances the table version and so the
+    /// cache generation, which strands results cached against the
+    /// pre-declaration schema. The semantic sidecar is cleared eagerly
+    /// for the same reason it is on a write: its entries are result
+    /// bytes shaped by a schema that no longer applies.
+    pub async fn declare_attributes(
+        &self,
+        ns: &NamespaceId,
+        declaration: &[AttributeColumn],
+    ) -> Result<Vec<AttributeColumn>, FirnflowError> {
+        self.metrics.record_s3_request(ns, "declare_attributes");
+        let declared = self.manager.declare_attributes(ns, declaration).await?;
+        self.semantic.invalidate(ns);
+        Ok(declared)
+    }
+
+    /// Build a BTree scalar index on `column`: `id`, `_ingested_at`,
+    /// or any declared attribute column. Records
+    /// `firnflow_index_build_duration_seconds{kind="scalar"}`
     /// on completion.
     ///
     /// Like the other index builders, this is a Lance commit, so it

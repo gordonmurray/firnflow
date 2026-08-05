@@ -147,6 +147,7 @@ async fn build_service() -> (
                     vector: unit_vector(i),
                     vectors: None,
                     text: Some(format!("row {}", i + 1)),
+                    attributes: Default::default(),
                 })
                 .collect(),
         )

@@ -53,7 +53,7 @@ use lancedb::index::scalar::{BTreeIndexBuilder, FtsIndexBuilder, FullTextSearchQ
 use lancedb::index::vector::IvfPqIndexBuilder;
 use lancedb::index::{Index, IndexType};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
-use lancedb::table::{OptimizeAction, WriteOptions};
+use lancedb::table::{NewColumnTransform, OptimizeAction, WriteOptions};
 use object_store::ObjectStore;
 use object_store::aws::AmazonS3Builder;
 use object_store::gcp::GoogleCloudStorageBuilder;
@@ -61,6 +61,10 @@ use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectStorePath;
 use xxhash_rust::xxh3::xxh3_64;
 
+use crate::attributes::{
+    AttributeColumn, AttributeInput, AttributeMap, AttributeReaders, AttributeType,
+    build_attribute_array, coerce_row_attributes, validate_attribute_declaration,
+};
 use crate::metrics::CoreMetrics;
 use crate::query::DEFAULT_NPROBES;
 use crate::result::{ListOrder, ListPage, ListRow, NamespaceInfo};
@@ -91,34 +95,18 @@ pub const LIST_MAX_LIMIT: usize = 500;
 ///   instead of a full-fragment scan, mirroring the constraint the
 ///   `/list` endpoint puts on `order_by`.
 ///
-/// The BTree only earns its keep on columns the read or write path
-/// actually uses; future user-column ordering work extends this slice.
+/// The engine-owned columns the `/scalar-index` endpoint will build a
+/// BTree on. A namespace's declared attribute columns are also valid
+/// targets, but they are per-namespace, so they are checked against
+/// the resolved schema rather than this list.
 const SCALAR_INDEX_COLUMNS: &[&str] = &["id", INGESTED_AT_COLUMN];
-
-/// Validate that `column` is one the scalar-index path will build a
-/// BTree on, returning [`FirnflowError::InvalidRequest`] otherwise.
-///
-/// Exposed so the API layer can reject an unsupported column with a
-/// synchronous `400` before it spawns the background build task —
-/// the same reasoning as [`crate::validate_ivf_pq_options`], which
-/// avoids a misleading `202` followed by a log-only failure.
-pub fn validate_scalar_index_column(column: &str) -> Result<(), FirnflowError> {
-    if SCALAR_INDEX_COLUMNS.contains(&column) {
-        Ok(())
-    } else {
-        Err(FirnflowError::InvalidRequest(format!(
-            "scalar index column {column:?} is not supported; \
-             valid columns: {SCALAR_INDEX_COLUMNS:?}"
-        )))
-    }
-}
 
 /// Per-namespace schema facts cached after the first table open.
 /// The resolved vector dimension, the kind of vector representation
-/// (single vs multivector), and whether the table carries the
-/// `_ingested_at` system column all come from the same schema read
-/// and are stored together.
-#[derive(Debug, Clone, Copy)]
+/// (single vs multivector), whether the table carries the
+/// `_ingested_at` system column, and the declared attribute columns
+/// all come from the same schema read and are stored together.
+#[derive(Debug, Clone)]
 struct NamespaceSchemaInfo {
     /// For [`VectorKind::Single`] this is the vector dimension. For
     /// [`VectorKind::Multivector`] this is the inner sub-vector
@@ -126,6 +114,12 @@ struct NamespaceSchemaInfo {
     dim: usize,
     kind: VectorKind,
     has_ingested_at: bool,
+    /// Declared attribute columns, in the order the Lance table holds
+    /// them. Order matters: a write batch is built positionally
+    /// against the table schema, and `add_columns` appends, so the
+    /// order a table reports is the order a batch must supply.
+    /// `Arc<[_]>` so cloning the info stays cheap on the read path.
+    attributes: Arc<[AttributeColumn]>,
 }
 
 /// A single row for upsert into a namespace.
@@ -155,6 +149,18 @@ pub struct UpsertRow {
     pub vectors: Option<Vec<Vec<f32>>>,
     /// Optional text payload for BM25 full-text search.
     pub text: Option<String>,
+    /// Values for the namespace's declared attribute columns, keyed
+    /// by column name. Every name must already be declared
+    /// ([`NamespaceManager::declare_attributes`]); an undeclared one
+    /// is rejected rather than dropped. Omitting a declared column
+    /// writes a null into it.
+    ///
+    /// Upsert replaces a matched row in full, so re-sending a row
+    /// without its attributes clears them, the same way it clears a
+    /// `text` that is not resent. A name mapped to `None` is an
+    /// explicit null: it still has to be a declared column, and it
+    /// stores the same null that omitting it would.
+    pub attributes: AttributeInput,
 }
 
 impl From<(u64, Vec<f32>)> for UpsertRow {
@@ -164,6 +170,7 @@ impl From<(u64, Vec<f32>)> for UpsertRow {
             vector,
             vectors: None,
             text: None,
+            attributes: AttributeInput::new(),
         }
     }
 }
@@ -345,17 +352,27 @@ impl NamespaceManager {
     /// request may consult the result cache.
     ///
     /// The schema carries the same columns a caller can filter on —
-    /// `id`, `vector`, `text`, and `_ingested_at` when present — so
-    /// a predicate that plans against it is one that will plan
-    /// against the live table.
+    /// `id`, `vector`, `text`, `_ingested_at` when present, and every
+    /// declared attribute column, so a predicate that plans against
+    /// it is one that will plan against the live table.
+    ///
+    /// Lance 6's resolver happens to be lenient about a column it
+    /// cannot find, leaving that part of the expression alone rather
+    /// than failing, so today an incomplete schema here would still
+    /// reach the same cacheability verdict. That leniency is not part
+    /// of any contract, and a stricter resolver would turn every
+    /// predicate over an attribute column into an analysis failure,
+    /// which this module reads as uncacheable. The cost of that would
+    /// be a silent loss of the result cache on exactly the queries
+    /// attribute columns exist to serve, so the schema is kept
+    /// complete rather than relying on the leniency.
     pub async fn filter_schema(
         &self,
         ns: &NamespaceId,
     ) -> Result<Option<SchemaRef>, FirnflowError> {
-        Ok(self
-            .resolve_schema_info(ns)
-            .await?
-            .map(|info| Self::schema_for_kind(info.kind, info.dim, info.has_ingested_at)))
+        Ok(self.resolve_schema_info(ns).await?.map(|info| {
+            Self::schema_for(info.kind, info.dim, info.has_ingested_at, &info.attributes)
+        }))
     }
 
     /// Hash an open table's manifest `(version, timestamp_nanos)` into a
@@ -411,7 +428,18 @@ impl NamespaceManager {
     /// `_ingested_at` system column is included. Fresh namespaces
     /// always use `true`; appends into pre-existing tables pass
     /// whatever the live table schema reports so the batch matches.
-    fn schema_for_kind(kind: VectorKind, dim: usize, with_ingested_at: bool) -> Arc<Schema> {
+    ///
+    /// `attributes` are the namespace's declared metadata columns, in
+    /// the order the live table holds them. They come last because
+    /// `add_columns` appends, so a table that gained attributes after
+    /// creation has them after `_ingested_at`, and a batch built for
+    /// that table has to agree.
+    fn schema_for(
+        kind: VectorKind,
+        dim: usize,
+        with_ingested_at: bool,
+        attributes: &[AttributeColumn],
+    ) -> Arc<Schema> {
         let inner_item = Arc::new(Field::new("item", DataType::Float32, true));
         let vector_type = match kind {
             VectorKind::Single => DataType::FixedSizeList(inner_item, dim as i32),
@@ -432,7 +460,15 @@ impl NamespaceManager {
                 false,
             ));
         }
+        fields.extend(attributes.iter().map(AttributeColumn::field));
         Arc::new(Schema::new(fields))
+    }
+
+    /// The engine-owned schema with no attribute columns. Used where
+    /// only the fixed part matters, such as validating the element
+    /// type of an incoming `/import` vector column.
+    fn schema_for_kind(kind: VectorKind, dim: usize, with_ingested_at: bool) -> Arc<Schema> {
+        Self::schema_for(kind, dim, with_ingested_at, &[])
     }
 
     async fn connect(&self, ns: &NamespaceId) -> Result<lancedb::Connection, FirnflowError> {
@@ -450,17 +486,27 @@ impl NamespaceManager {
             .map_err(|e| FirnflowError::Backend(format!("lancedb connect: {e}")))
     }
 
-    /// Insert a freshly opened `NamespaceHandle` into the pool and
-    /// bump the `cached_handles` gauge. If a handle for `ns` already
-    /// exists (race between two concurrent openers), the second
-    /// insert overwrites the first — both are valid, the first is
-    /// simply dropped.
+    /// Pool a freshly opened `NamespaceHandle` and bump the
+    /// `cached_handles` gauge.
+    ///
+    /// A handle already in the pool wins and the new one is dropped.
+    /// Two concurrent openers of the same namespace would both be
+    /// valid, so keeping either would do, but a third case is not
+    /// symmetric: an opener can be paused between opening its table
+    /// and reaching this point, and a schema change that evicts and
+    /// re-pools in that window leaves this call holding a handle that
+    /// pre-dates the new columns. Overwriting would put it back in the
+    /// pool for the next caller, who reads the post-change schema
+    /// facts and then finds a batch without those columns in it.
+    /// Keeping the incumbent makes the stale handle a cost to this
+    /// call alone, which already read the schema facts that match it.
     fn cache_handle(&self, ns: &NamespaceId, conn: lancedb::Connection, table: lancedb::Table) {
-        let previous = self
-            .handles
-            .insert(ns.clone(), NamespaceHandle { conn, table });
-        if previous.is_none() {
-            self.metrics.inc_cached_handles();
+        match self.handles.entry(ns.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(_) => {}
+            dashmap::mapref::entry::Entry::Vacant(slot) => {
+                slot.insert(NamespaceHandle { conn, table });
+                self.metrics.inc_cached_handles();
+            }
         }
     }
 
@@ -505,9 +551,12 @@ impl NamespaceManager {
             Ok(tbl) => tbl,
             Err(_) => {
                 // Fresh namespace: always create with the current
-                // schema, which includes `_ingested_at`.
+                // schema, which includes `_ingested_at`. Attribute
+                // columns are never part of a fresh table: they are
+                // declared against a namespace that already exists,
+                // and arrive through `add_columns`.
                 let schema = Self::schema_for_kind(kind, dim, true);
-                let empty = rows_to_batch(&schema, kind, dim, Vec::new(), true)?;
+                let empty = rows_to_batch(&schema, kind, dim, Vec::new(), true, &[])?;
                 let reader: Box<dyn RecordBatchReader + Send> =
                     Box::new(RecordBatchIterator::new(vec![Ok(empty)], schema));
                 conn.create_table(TABLE_NAME, reader)
@@ -563,10 +612,10 @@ impl NamespaceManager {
         ns: &NamespaceId,
     ) -> Result<Option<NamespaceSchemaInfo>, FirnflowError> {
         if let Some(info) = self.schema_info.get(ns) {
-            return Ok(Some(*info));
+            return Ok(Some(info.clone()));
         }
         if let Some((_tbl, info)) = self.open_existing(ns).await? {
-            self.schema_info.insert(ns.clone(), info);
+            self.schema_info.insert(ns.clone(), info.clone());
             return Ok(Some(info));
         }
         Ok(None)
@@ -605,7 +654,7 @@ impl NamespaceManager {
     pub async fn upsert(
         &self,
         ns: &NamespaceId,
-        rows: Vec<UpsertRow>,
+        mut rows: Vec<UpsertRow>,
     ) -> Result<(), FirnflowError> {
         if rows.is_empty() {
             return Ok(());
@@ -641,6 +690,7 @@ impl NamespaceManager {
                         dim,
                         kind,
                         has_ingested_at: true,
+                        attributes: Arc::from([]),
                     },
                     true,
                 )
@@ -649,9 +699,12 @@ impl NamespaceManager {
 
         // Validate every row against the namespace's resolved kind
         // and dim. Mixed-shape requests fail at the API boundary
-        // with a precise per-row message.
-        for row in &rows {
+        // with a precise per-row message. Attribute values are
+        // checked against the declared columns in the same pass, and
+        // an integer sent to a `float` column is widened here.
+        for row in &mut rows {
             validate_row_against(row, info.kind, info.dim)?;
+            coerce_row_attributes(row.id, &mut row.attributes, &info.attributes)?;
         }
 
         // `get_or_open_table` creates an empty table for a fresh
@@ -660,8 +713,15 @@ impl NamespaceManager {
         // row is "not matched" and inserted; into a populated table
         // matched ids are replaced and new ids inserted.
         let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
-        let schema = Self::schema_for_kind(info.kind, info.dim, info.has_ingested_at);
-        let batch = rows_to_batch(&schema, info.kind, info.dim, rows, info.has_ingested_at)?;
+        let schema = Self::schema_for(info.kind, info.dim, info.has_ingested_at, &info.attributes);
+        let batch = rows_to_batch(
+            &schema,
+            info.kind,
+            info.dim,
+            rows,
+            info.has_ingested_at,
+            &info.attributes,
+        )?;
         let reader: Box<dyn RecordBatchReader + Send> =
             Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema));
         let mut merge = tbl.merge_insert(&["id"]);
@@ -673,7 +733,21 @@ impl NamespaceManager {
             .await
             .map_err(|e| FirnflowError::Backend(format!("table.merge_insert: {e}")))?;
 
-        self.schema_info.insert(ns.clone(), info);
+        // Only a fresh namespace needs its schema facts published here:
+        // `resolve_schema_info` already cached them for one that
+        // existed. Writing the snapshot back unconditionally would be
+        // worse than redundant, because the snapshot was taken before
+        // the write and a `declare_attributes` that committed in the
+        // meantime has since replaced the cached entry with one that
+        // knows about the new columns. Overwriting it would put the
+        // pre-declaration attribute list back and leave this process
+        // rejecting values for a column that exists. `or_insert`
+        // rather than `insert` for the same reason at a smaller
+        // scale: this call created the namespace, but a declaration
+        // against it can still have landed since.
+        if is_fresh {
+            self.schema_info.entry(ns.clone()).or_insert(info.clone());
+        }
 
         // On the namespace's first write, build a BTree on `id` so
         // every subsequent merge-insert finds its matches through the
@@ -729,6 +803,116 @@ impl NamespaceManager {
         Ok(())
     }
 
+    /// The attribute columns currently declared on a namespace, in
+    /// table order. `None` for a namespace that has never been
+    /// written to.
+    pub async fn attributes_for(
+        &self,
+        ns: &NamespaceId,
+    ) -> Result<Option<Vec<AttributeColumn>>, FirnflowError> {
+        Ok(self
+            .resolve_schema_info(ns)
+            .await?
+            .map(|info| info.attributes.to_vec()))
+    }
+
+    /// Declare typed attribute columns on a namespace, adding any that
+    /// are new to the Lance table.
+    ///
+    /// The namespace must already exist. That matches the other
+    /// schema-affecting endpoints (index builds, compaction), and it
+    /// keeps the Lance table schema the single record of what is
+    /// declared: there is no pending declaration held in memory that a
+    /// restart could lose and no second place for the two to disagree.
+    /// A namespace is created by its first write, so the order is
+    /// write, declare, then write again with values.
+    ///
+    /// Idempotent. Re-declaring a column with the type it already has
+    /// is accepted and commits nothing, so a caller can send its full
+    /// intended schema on every startup. Re-declaring one with a
+    /// different type is rejected: Lance can cast a column in place,
+    /// but the values already stored under the old type would be
+    /// reinterpreted or dropped, which is not something to do behind a
+    /// declaration that reads as additive.
+    ///
+    /// Existing rows get a null in each new column. The write is one
+    /// `add_columns` commit for all of them, which advances the table
+    /// version and therefore the cache generation, so results cached
+    /// before the declaration are stranded and the next query
+    /// repopulates. Returns the namespace's full attribute set as it
+    /// stands after the call.
+    pub async fn declare_attributes(
+        &self,
+        ns: &NamespaceId,
+        declaration: &[AttributeColumn],
+    ) -> Result<Vec<AttributeColumn>, FirnflowError> {
+        validate_attribute_declaration(declaration)?;
+
+        let info = self.resolve_schema_info(ns).await?.ok_or_else(|| {
+            FirnflowError::InvalidRequest(format!(
+                "cannot declare attributes on namespace {ns}: no data has been upserted yet; \
+                 write a row first, then declare"
+            ))
+        })?;
+
+        let mut additions: Vec<Field> = Vec::new();
+        for column in declaration {
+            match info.attributes.iter().find(|c| c.name == column.name) {
+                Some(existing) if existing.ty == column.ty => {}
+                Some(existing) => {
+                    return Err(FirnflowError::InvalidRequest(format!(
+                        "attribute {:?} is already declared as {} and cannot be redeclared as {}",
+                        column.name,
+                        existing.ty.as_label(),
+                        column.ty.as_label(),
+                    )));
+                }
+                None => additions.push(column.field()),
+            }
+        }
+
+        let total = info.attributes.len() + additions.len();
+        if total > crate::attributes::MAX_ATTRIBUTE_COLUMNS {
+            return Err(FirnflowError::InvalidRequest(format!(
+                "namespace {ns} would hold {total} attribute columns; the limit is {}",
+                crate::attributes::MAX_ATTRIBUTE_COLUMNS
+            )));
+        }
+
+        if additions.is_empty() {
+            return Ok(info.attributes.to_vec());
+        }
+
+        let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
+        tbl.add_columns(
+            NewColumnTransform::AllNulls(Arc::new(Schema::new(additions))),
+            None,
+        )
+        .await
+        .map_err(|e| FirnflowError::Backend(format!("add_columns: {e}")))?;
+
+        // The pooled handle still points at the pre-declaration
+        // schema, so drop it and read the new one back from the table
+        // rather than assuming the order the columns landed in.
+        //
+        // The handle goes first and the schema facts second, and the
+        // order is load-bearing. A reader takes the schema facts and
+        // then the handle, so with this order the worst it can pair is
+        // the old facts with the new handle, which reads the columns it
+        // knows about and ignores the rest. Removing the facts first
+        // would allow the reverse pairing, new facts against a handle
+        // that pre-dates the columns they name, and the result reader
+        // treats a declared column missing from a batch as a fault.
+        self.evict_handle(ns);
+        self.schema_info.remove(ns);
+        let refreshed = self.resolve_schema_info(ns).await?.ok_or_else(|| {
+            FirnflowError::Backend(format!(
+                "namespace {ns} disappeared while declaring attributes"
+            ))
+        })?;
+        Ok(refreshed.attributes.to_vec())
+    }
+
     /// Bulk-append the rows from an Arrow IPC stream, insert-only, in a
     /// single Lance commit.
     ///
@@ -749,6 +933,12 @@ impl NamespaceManager {
     /// match. No `id` index is built (this path never does a merge
     /// lookup — build indexes after the load, per the large-ingest
     /// recipe). Returns the number of rows appended.
+    ///
+    /// Attribute columns are written as nulls. The stream schema does
+    /// not carry attribute values yet, so a namespace with declared
+    /// attributes can still be bulk-loaded, but the loaded rows will
+    /// not match a predicate over those columns until they are
+    /// rewritten through [`upsert`](Self::upsert).
     pub async fn import_arrow(
         &self,
         ns: &NamespaceId,
@@ -759,7 +949,9 @@ impl NamespaceManager {
 
         // Fresh namespace: the stream fixes kind/dim. Existing: it must
         // match the established shape.
-        let info = match self.resolve_schema_info(ns).await? {
+        let resolved = self.resolve_schema_info(ns).await?;
+        let is_fresh = resolved.is_none();
+        let info = match resolved {
             Some(info) => {
                 if info.kind != kind || info.dim != dim {
                     return Err(FirnflowError::InvalidRequest(format!(
@@ -775,11 +967,12 @@ impl NamespaceManager {
                 dim,
                 kind,
                 has_ingested_at: true,
+                attributes: Arc::from([]),
             },
         };
 
         let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
-        let canonical = Self::schema_for_kind(info.kind, info.dim, true);
+        let canonical = Self::schema_for(info.kind, info.dim, true, &info.attributes);
 
         // Column positions in the incoming stream (any order).
         let id_idx = in_schema
@@ -808,6 +1001,7 @@ impl NamespaceManager {
             text_idx,
             ts_micros: current_micros(),
             rows: Arc::clone(&rows),
+            attributes: Arc::clone(&info.attributes),
         };
 
         // One append commit for the whole stream. `WriteParams::default()`
@@ -829,7 +1023,13 @@ impl NamespaceManager {
             .await
             .map_err(map_import_lance_error)?;
 
-        self.schema_info.insert(ns.clone(), info);
+        // Same reasoning as `upsert`: publish the schema facts only for
+        // a namespace this call created, and only if nothing has
+        // published them since, so a `declare_attributes` that
+        // committed while the stream was being written is not undone.
+        if is_fresh {
+            self.schema_info.entry(ns.clone()).or_insert(info.clone());
+        }
         Ok(rows.load(Ordering::Relaxed) as usize)
     }
 
@@ -1116,13 +1316,17 @@ impl NamespaceManager {
         // the selection. `id` and `text` are always in the schema;
         // `_ingested_at` only exists on tables created since the
         // column was introduced.
-        let projection: Option<Vec<&str>> = if include_vector {
+        let projection: Option<Vec<String>> = if include_vector {
             None
         } else {
-            let mut cols = vec!["id", "text"];
+            let mut cols = vec!["id".to_string(), "text".to_string()];
             if info.has_ingested_at {
-                cols.push(INGESTED_AT_COLUMN);
+                cols.push(INGESTED_AT_COLUMN.to_string());
             }
+            // Attribute columns are part of the response, so an
+            // explicit projection has to keep them; leaving them out
+            // would make `include_vector: false` quietly drop metadata.
+            cols.extend(info.attributes.iter().map(|c| c.name.clone()));
             Some(cols)
         };
 
@@ -1204,7 +1408,7 @@ impl NamespaceManager {
             .await
             .map_err(|e| FirnflowError::Backend(format!("query.collect: {e}")))?;
 
-        let results = batches_to_results(&batches, info.kind, include_vector)?;
+        let results = batches_to_results(&batches, info.kind, include_vector, &info.attributes)?;
         Ok(QueryResultSet {
             query_id: String::new(),
             results,
@@ -1368,13 +1572,78 @@ impl NamespaceManager {
         Ok(())
     }
 
+    /// Check that `column` is one this namespace can carry a BTree
+    /// on, and report the resolved schema facts so a caller that is
+    /// about to build the index does not resolve them twice.
+    ///
+    /// Valid targets are the engine-owned `id` and `_ingested_at`
+    /// plus every declared attribute column. Attribute columns are
+    /// what makes the check per-namespace: the name a caller wants an
+    /// index on has to exist on this table, and only the table knows.
+    async fn resolve_scalar_index_target(
+        &self,
+        ns: &NamespaceId,
+        column: &str,
+    ) -> Result<NamespaceSchemaInfo, FirnflowError> {
+        let info = self.resolve_schema_info(ns).await?.ok_or_else(|| {
+            FirnflowError::InvalidRequest(format!(
+                "cannot create scalar index on namespace {ns}: no data has been upserted yet"
+            ))
+        })?;
+
+        if column == INGESTED_AT_COLUMN && !info.has_ingested_at {
+            return Err(FirnflowError::Unsupported(format!(
+                "namespace {ns} pre-dates the _ingested_at column; \
+                 recreate the namespace before building a scalar index on it"
+            )));
+        }
+
+        let known = SCALAR_INDEX_COLUMNS.contains(&column)
+            || info.attributes.iter().any(|c| c.name == column);
+        if !known {
+            let mut valid: Vec<&str> = SCALAR_INDEX_COLUMNS.to_vec();
+            valid.extend(info.attributes.iter().map(|c| c.name.as_str()));
+            return Err(FirnflowError::InvalidRequest(format!(
+                "scalar index column {column:?} is not supported on namespace {ns}; \
+                 valid columns: {valid:?}"
+            )));
+        }
+
+        Ok(info)
+    }
+
+    /// Whether `column` can carry a BTree on this namespace.
+    ///
+    /// Exposed so the API layer can reject an unsupported column with
+    /// a synchronous `400` before it spawns the background build
+    /// task, the same reasoning as [`crate::validate_ivf_pq_options`],
+    /// which avoids a misleading `202` followed by a log-only failure.
+    ///
+    /// The engine-owned columns are answered without reading the
+    /// namespace's schema. They exist on every namespace, so there is
+    /// nothing a schema read could add, and keeping them off the I/O
+    /// path means an unreachable backend cannot turn an otherwise
+    /// valid request into a 500 before the background task has had a
+    /// chance to retry it.
+    pub async fn validate_scalar_index_column(
+        &self,
+        ns: &NamespaceId,
+        column: &str,
+    ) -> Result<(), FirnflowError> {
+        if SCALAR_INDEX_COLUMNS.contains(&column) {
+            return Ok(());
+        }
+        self.resolve_scalar_index_target(ns, column).await.map(drop)
+    }
+
     /// Build a BTree scalar index on a namespace column.
     ///
-    /// Accepts the columns in [`SCALAR_INDEX_COLUMNS`]: `id` to speed
-    /// up merge-insert match-finding on the write path, and
-    /// `_ingested_at` to let `/list` cursor pages do an index range
-    /// scan instead of a full-fragment scan and let the leading
-    /// `ORDER BY _ingested_at` short-circuit the in-memory sort.
+    /// Accepts `id` to speed up merge-insert match-finding on the
+    /// write path, `_ingested_at` to let `/list` cursor pages do an
+    /// index range scan instead of a full-fragment scan and let the
+    /// leading `ORDER BY _ingested_at` short-circuit the in-memory
+    /// sort, and any declared attribute column so a filter predicate
+    /// over it narrows through the index rather than a scan.
     ///
     /// New namespaces get the `id` index automatically on first
     /// write; this endpoint is the maintenance path for building it
@@ -1395,20 +1664,7 @@ impl NamespaceManager {
         ns: &NamespaceId,
         column: &str,
     ) -> Result<(), FirnflowError> {
-        validate_scalar_index_column(column)?;
-
-        let info = self.resolve_schema_info(ns).await?.ok_or_else(|| {
-            FirnflowError::InvalidRequest(format!(
-                "cannot create scalar index on namespace {ns}: no data has been upserted yet"
-            ))
-        })?;
-
-        if column == INGESTED_AT_COLUMN && !info.has_ingested_at {
-            return Err(FirnflowError::Unsupported(format!(
-                "namespace {ns} pre-dates the _ingested_at column; \
-                 recreate the namespace before building a scalar index on it"
-            )));
-        }
+        let info = self.resolve_scalar_index_target(ns, column).await?;
 
         let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
         tbl.create_index(&[column], Index::BTree(BTreeIndexBuilder::default()))
@@ -1572,7 +1828,7 @@ impl NamespaceManager {
             .await
             .map_err(|e| FirnflowError::Backend(format!("scan.collect: {e}")))?;
 
-        let mut rows = batches_to_list_rows(&batches, info.kind)?;
+        let mut rows = batches_to_list_rows(&batches, info.kind, &info.attributes)?;
 
         let next_cursor = if rows.len() > limit {
             rows.truncate(limit);
@@ -1640,6 +1896,7 @@ impl NamespaceManager {
             has_fts_index,
             has_scalar_index,
             table_version: manifest.version,
+            attributes: schema.attributes.to_vec(),
         }))
     }
 }
@@ -1714,6 +1971,14 @@ pub struct CompactResult {
 ///
 /// The `_ingested_at` flag is set when a column of that name with a
 /// `Timestamp(Microsecond)` type is present.
+///
+/// Everything that is not an engine-owned column is a declared
+/// attribute, read back in table order so a write batch can be built
+/// positionally against it. A column whose Arrow type is not one an
+/// attribute can have is an error rather than something to skip past:
+/// Firn owns this table's schema, so a type it cannot name means the
+/// reconstructed write schema would no longer match the table, and a
+/// clear message here beats an opaque batch-build failure later.
 async fn read_schema_info_from_table(
     tbl: &lancedb::Table,
 ) -> Result<NamespaceSchemaInfo, FirnflowError> {
@@ -1723,6 +1988,7 @@ async fn read_schema_info_from_table(
         .map_err(|e| FirnflowError::Backend(format!("read schema: {e}")))?;
     let mut dim_kind: Option<(usize, VectorKind)> = None;
     let mut has_ingested_at = false;
+    let mut attributes: Vec<AttributeColumn> = Vec::new();
     for field in schema.fields() {
         match field.name().as_str() {
             "vector" => match field.data_type() {
@@ -1744,7 +2010,16 @@ async fn read_schema_info_from_table(
                     has_ingested_at = true;
                 }
             }
-            _ => {}
+            "id" | "text" => {}
+            other => {
+                let ty = AttributeType::from_arrow(field.data_type()).ok_or_else(|| {
+                    FirnflowError::Backend(format!(
+                        "table column {other:?} has type {:?}, which is not an attribute type",
+                        field.data_type()
+                    ))
+                })?;
+                attributes.push(AttributeColumn::new(other, ty));
+            }
         }
     }
     let (dim, kind) = dim_kind.ok_or_else(|| {
@@ -1756,6 +2031,7 @@ async fn read_schema_info_from_table(
         dim,
         kind,
         has_ingested_at,
+        attributes: attributes.into(),
     })
 }
 
@@ -2028,6 +2304,8 @@ struct IngestReader {
     text_idx: Option<usize>,
     ts_micros: i64,
     rows: Arc<AtomicU64>,
+    /// Declared attribute columns, filled with nulls on this path.
+    attributes: Arc<[AttributeColumn]>,
 }
 
 impl IngestReader {
@@ -2116,7 +2394,15 @@ impl IngestReader {
             std::iter::repeat_n(self.ts_micros, n),
         ));
 
-        let out = RecordBatch::try_new(self.canonical.clone(), vec![id, vector, text, ts])?;
+        let mut columns = vec![id, vector, text, ts];
+        // Declared attribute columns are filled with nulls: the import
+        // stream does not carry attribute values yet, and the batch
+        // still has to match the table's schema column for column.
+        for column in self.attributes.iter() {
+            columns.push(new_null_array(&column.ty.arrow_type(), n));
+        }
+
+        let out = RecordBatch::try_new(self.canonical.clone(), columns)?;
         self.rows.fetch_add(n as u64, Ordering::Relaxed);
         Ok(out)
     }
@@ -2217,6 +2503,7 @@ fn rows_to_batch(
     dim: usize,
     rows: Vec<UpsertRow>,
     include_ingested_at: bool,
+    attributes: &[AttributeColumn],
 ) -> Result<RecordBatch, FirnflowError> {
     let n = rows.len();
     let ids = UInt64Array::from_iter_values(rows.iter().map(|r| r.id));
@@ -2280,6 +2567,17 @@ fn rows_to_batch(
         let ts = current_micros();
         let ts_array = TimestampMicrosecondArray::from_iter_values(std::iter::repeat_n(ts, n));
         columns.push(Arc::new(ts_array) as ArrayRef);
+    }
+
+    // Declared attribute columns, in table order. A row that omits a
+    // column contributes a null to it, which is also what a row
+    // written before the column was declared holds.
+    for column in attributes {
+        columns.push(build_attribute_array(
+            column,
+            rows.iter()
+                .map(|r| r.attributes.get(&column.name).and_then(Option::as_ref)),
+        )?);
     }
 
     RecordBatch::try_new(schema.clone(), columns)
@@ -2358,9 +2656,11 @@ fn extract_row_vector(
 fn batches_to_list_rows(
     batches: &[RecordBatch],
     kind: VectorKind,
+    attributes: &[AttributeColumn],
 ) -> Result<Vec<ListRow>, FirnflowError> {
     let mut out = Vec::new();
     for batch in batches {
+        let attribute_readers = AttributeReaders::new(batch, attributes)?;
         let ids = batch
             .column_by_name("id")
             .ok_or_else(|| FirnflowError::Backend("list: missing id column".into()))?
@@ -2388,11 +2688,17 @@ fn batches_to_list_rows(
                     Some(t.value(row).to_owned())
                 }
             });
+            let row_attributes = if attribute_readers.is_empty() {
+                AttributeMap::new()
+            } else {
+                attribute_readers.row(row)?
+            };
             out.push(ListRow {
                 id: ids.value(row),
                 vector,
                 text,
                 ingested_at_micros: ingested_at.value(row),
+                attributes: row_attributes,
             });
         }
     }
@@ -2403,9 +2709,11 @@ fn batches_to_results(
     batches: &[RecordBatch],
     kind: VectorKind,
     include_vector: bool,
+    attributes: &[AttributeColumn],
 ) -> Result<Vec<QueryResult>, FirnflowError> {
     let mut out = Vec::new();
     for batch in batches {
+        let attribute_readers = AttributeReaders::new(batch, attributes)?;
         let ids = batch
             .column_by_name("id")
             .ok_or_else(|| FirnflowError::Backend("query result: missing id column".into()))?
@@ -2454,12 +2762,18 @@ fn batches_to_results(
                     Some(a.value(row))
                 }
             });
+            let row_attributes = if attribute_readers.is_empty() {
+                AttributeMap::new()
+            } else {
+                attribute_readers.row(row)?
+            };
             out.push(QueryResult {
                 id: ids.value(row),
                 score: scores.value(row),
                 vector,
                 text,
                 ingested_at_micros,
+                attributes: row_attributes,
             });
         }
     }
@@ -2497,20 +2811,15 @@ mod tests {
         assert!(decode_list_cursor(&"z".repeat(32)).is_err());
     }
 
+    /// The engine-owned scalar-index columns are the ones
+    /// `validate_scalar_index_column` answers without a schema read,
+    /// so what is in this list decides which requests can be
+    /// validated while the backend is unreachable. Anything else,
+    /// including a declared attribute column, goes through the
+    /// namespace's schema and is covered by the integration tests.
     #[test]
-    fn scalar_index_column_validation() {
-        // Both supported columns pass.
-        assert!(validate_scalar_index_column("id").is_ok());
-        assert!(validate_scalar_index_column(INGESTED_AT_COLUMN).is_ok());
-        // Anything else is a 400-mapped InvalidRequest.
-        assert!(matches!(
-            validate_scalar_index_column("vector"),
-            Err(FirnflowError::InvalidRequest(_))
-        ));
-        assert!(matches!(
-            validate_scalar_index_column("text"),
-            Err(FirnflowError::InvalidRequest(_))
-        ));
+    fn engine_owned_scalar_index_columns() {
+        assert_eq!(SCALAR_INDEX_COLUMNS, ["id", INGESTED_AT_COLUMN]);
     }
 
     #[test]
