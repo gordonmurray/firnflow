@@ -49,11 +49,13 @@
     <p class="subtitle">Run Firn locally with Docker Compose or deploy to production as a standalone container.</p>
 
     <h2>Local development</h2>
-    <p>The Docker Compose file launches MinIO (local S3) alongside the Firn API. No host Rust toolchain is required.</p>
+    <p>The Docker Compose file launches MinIO (local S3) alongside the published Firn API image. No host Rust toolchain or local compilation is required.</p>
 
     <pre><code>git clone https://github.com/gordonmurray/firnflow
 cd firnflow
-docker compose up --build</code></pre>
+docker compose up -d</code></pre>
+
+    <p>Check readiness with <code>curl http://localhost:3000/health</code>. To build the image from the checkout instead, run <code>docker build -t firnflow:local .</code> and start with <code>FIRNFLOW_IMAGE=firnflow:local docker compose up -d</code>.</p>
 
     <p>This starts three services:</p>
     <table>
@@ -79,7 +81,10 @@ FIRNFLOW_S3_SECRET_KEY=minioadmin \
   cargo run -p firnflow-api</code></pre>
 
     <h2>Production Docker</h2>
-    <p>The included <code>Dockerfile</code> is a multi-stage build that produces a minimal production image.</p>
+    <p>For production, use the published image or build the included multi-stage <code>Dockerfile</code> yourself.</p>
+
+    <h3>Published image</h3>
+    <pre><code>docker pull ghcr.io/gordonmurray/firnflow:0.9.5</code></pre>
 
     <h3>Build the image</h3>
     <pre><code>docker build -t firnflow-api .</code></pre>
@@ -102,7 +107,8 @@ FIRNFLOW_S3_SECRET_KEY=minioadmin \
   -e FIRNFLOW_CACHE_MEMORY_BYTES=268435456 \
   -e FIRNFLOW_CACHE_NVME_BYTES=10737418240 \
   -v firn-cache:/var/lib/firnflow/cache \
-  firnflow-api</code></pre>
+  ghcr.io/gordonmurray/firnflow:0.9.5</code></pre>
+    <p>If you built the image locally with the preceding command, replace the final image name with <code>firnflow-api</code>.</p>
     <p>For native GCS, swap the URI scheme and mount a service-account JSON: <code>-e FIRNFLOW_STORAGE_URI=gs://my-production-bucket -e GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp-sa.json -v /etc/gcp-sa.json:/etc/gcp-sa.json:ro</code>. Everything else stays the same.</p>
 
     <div class="callout callout-info">
@@ -203,16 +209,16 @@ volumes:
 }</code></pre>
 
     <h2>Authentication and rate limiting</h2>
-    <p>The API ships with optional bearer-token authentication. <strong>Production deployments should always set <code>FIRNFLOW_API_KEY</code></strong> — running without it triggers a startup <code>WARN</code> log line and is unsupported. See <a href="configuration.html#authentication">configuration</a> for the full env-var list.</p>
+    <p>The API ships with optional bearer-token authentication. <strong>Production deployments should always set <code>FIRNFLOW_API_KEY</code></strong>. Running without it triggers a startup <code>WARN</code> log line and is unsupported. See <a href="configuration.html#authentication">configuration</a> for the full env-var list.</p>
     <ul>
-      <li><code>FIRNFLOW_API_KEY</code> — read/write tier. Required.</li>
-      <li><code>FIRNFLOW_ADMIN_API_KEY</code> — separate destructive-ops key. Optional but recommended; set to a different value to lock <code>delete</code> / <code>compact</code> / index builds behind a credential the application clients do not hold.</li>
-      <li><code>FIRNFLOW_METRICS_TOKEN</code> — optional gate on <code>/metrics</code>. Use the same Bearer header.</li>
-      <li><code>FIRNFLOW_RATE_LIMIT_RPS</code> + <code>FIRNFLOW_RATE_LIMIT_BURST</code> — per-principal token-bucket limiter. Set once a normal traffic baseline is visible in <code>/metrics</code>.</li>
-      <li><code>FIRNFLOW_TRUST_PROXY_HEADERS=true</code> — only when Firn sits behind a load balancer or reverse proxy that strips client-supplied <code>X-Forwarded-For</code> at the edge.</li>
+      <li><code>FIRNFLOW_API_KEY</code>: read/write tier. Required.</li>
+      <li><code>FIRNFLOW_ADMIN_API_KEY</code>: separate destructive-ops key. Optional but recommended; set to a different value to lock <code>delete</code> / <code>compact</code> / index builds behind a credential the application clients do not hold.</li>
+      <li><code>FIRNFLOW_METRICS_TOKEN</code>: optional gate on <code>/metrics</code>. Use the same Bearer header.</li>
+      <li><code>FIRNFLOW_RATE_LIMIT_RPS</code> + <code>FIRNFLOW_RATE_LIMIT_BURST</code>: per-principal token-bucket limiter. Set once a normal traffic baseline is visible in <code>/metrics</code>.</li>
+      <li><code>FIRNFLOW_TRUST_PROXY_HEADERS=true</code>: only when Firn sits behind a load balancer or reverse proxy that strips client-supplied <code>X-Forwarded-For</code> at the edge.</li>
     </ul>
 
-    <p>Recommended rollout: deploy 0.5.0 with no keys (verify the WARN appears), set <code>FIRNFLOW_API_KEY</code>, roll clients to send <code>Authorization: Bearer …</code>, then set <code>FIRNFLOW_ADMIN_API_KEY</code> to a distinct value, and finally tune the rate-limit knobs. Rollback is to unset the variables and restart — no on-disk schema or cache format change.</p>
+    <p>Recommended rollout: set <code>FIRNFLOW_API_KEY</code> before exposing the service, roll clients to send <code>Authorization: Bearer …</code>, then set <code>FIRNFLOW_ADMIN_API_KEY</code> to a distinct value, and finally tune the rate-limit knobs. Rollback is to unset the variables and restart. No on-disk schema or cache format change is involved.</p>
 
     <pre><code># curl with bearer header
 curl -X POST https://firn.example.com/ns/production/upsert \

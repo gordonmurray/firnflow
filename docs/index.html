@@ -28,7 +28,7 @@
     <div class="hero">
       <h1>Vector search on object storage</h1>
       <p class="subtitle">
-        A multi-tenant search engine that pairs LanceDB with a tiered RAM + NVMe cache. Every namespace lives on cheap object storage (AWS S3, MinIO, R2, Tigris, DigitalOcean Spaces, or native Google Cloud Storage) with near-zero idle cost. A cache hit never re-runs the search, and once a namespace's handle is warm it costs zero backend requests.
+        A self-hosted, multi-tenant hybrid search engine for teams that want vector and full-text retrieval on object storage. LanceDB provides the search layer; a tiered RAM + NVMe cache keeps hot traffic fast while inactive namespaces retain near-zero idle cost.
       </p>
       <div class="hero-actions">
         <a href="quickstart.html" class="btn btn-primary">Get started</a>
@@ -63,10 +63,10 @@
       The result: your data lives cheaply on object storage, but hot and near-duplicate queries can feel local. The <code>/metrics</code> endpoint shows exactly how many backend requests the exact and semantic cache layers are saving you.
     </p>
     <p>
-      New in 0.6.0: native Google Cloud Storage support. Set <code>FIRNFLOW_STORAGE_URI=gs://your-bucket</code> and Firn routes through lancedb's native GCS backend, using the GCS XML API's generation precondition (<code>x-goog-if-generation-match: 0</code>) instead of <code>If-None-Match: *</code>. Validated by the same 100-run Lance concurrent-writer stress that gates every other backend. Switching between AWS S3, MinIO, Cloudflare R2, Tigris, DigitalOcean Spaces, and native GCS is a single env-var change &mdash; see the <a href="https://github.com/gordonmurray/firnflow#backend-configuration">backend configuration recipes</a>.
+      Firn runs against AWS S3, MinIO, Cloudflare R2, Tigris, DigitalOcean Spaces, or native Google Cloud Storage. Switching backends is an environment-variable change; see the <a href="https://github.com/gordonmurray/firnflow#backend-configuration">backend configuration recipes</a>. The local quickstart uses a published Docker image and MinIO, so there is no Rust build step.
     </p>
     <p>
-      Production hardening, new in 0.5.0: optional bearer-token authentication with a read/write and admin scope split, optional <code>tower-governor</code> rate limiting keyed on the validated principal, and an opt-in <code>/metrics</code> token. See <a href="configuration.html#authentication">configuration</a> and <a href="deployment.html#authentication-and-rate-limiting">deployment</a>.
+      Production hardening includes optional bearer-token authentication, read/write and admin scope separation, rate limiting, Prometheus metrics, and background operation tracking. See <a href="configuration.html#authentication">configuration</a> and <a href="deployment.html#authentication-and-rate-limiting">deployment</a>.
     </p>
 
     <h2>Documentation</h2>
@@ -78,7 +78,7 @@
       </a>
       <a href="api.html" class="card" style="text-decoration:none;color:inherit">
         <h3>API Reference</h3>
-        <p>All nine endpoints with request and response schemas, status codes, and curl examples.</p>
+        <p>The complete API surface with request and response schemas, status codes, and curl examples.</p>
       </a>
       <a href="configuration.html" class="card" style="text-decoration:none;color:inherit">
         <h3>Configuration</h3>
@@ -96,6 +96,22 @@
         <h3>Monitoring</h3>
         <p>Prometheus metrics, PromQL examples, alerting rules, and Grafana dashboard guidance.</p>
       </a>
+    </div>
+
+    <h2>Who Firn is for</h2>
+    <p>Firn is designed for self-hosted and BYO-cloud search: multi-tenant SaaS products, private RAG systems, and teams replacing an always-on OpenSearch, Elasticsearch, Vespa, or custom vector-search service where idle cost and operational weight matter.</p>
+    <p>It is not a hosted SaaS product and it does not try to replace every search platform. OpenSearch and Elasticsearch have broader operational ecosystems; Vespa has deeper ranking and real-time serving capabilities. Firn's focus is a smaller, deployable service with explicit object-storage economics, hybrid retrieval, and namespace isolation.</p>
+
+    <h2>Start in minutes</h2>
+    <pre><code>git clone https://github.com/gordonmurray/firnflow
+cd firnflow
+docker compose up -d
+curl http://localhost:3000/health</code></pre>
+    <p>Then follow the <a href="quickstart.html">quickstart</a> to insert vectors, run hybrid search, and verify cache savings. For embedded Python use, install <a href="https://pypi.org/project/firn/"><code>firn</code> from PyPI</a>.</p>
+
+    <div class="callout callout-warning">
+      <div class="callout-title">Current scope</div>
+      Firn is pre-1.0 and currently assumes one authoritative server process per bucket. The Arrow import route is insert-only, and per-row deletion and arbitrary user-defined metadata columns are not yet part of the API. See the README for the full limitations and storage trade-offs.
     </div>
 
     <h2>Performance on real AWS S3</h2>

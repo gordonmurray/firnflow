@@ -1,8 +1,6 @@
-# Local dev harness for firnflow.
-#
-# MinIO provides the S3-compatible object store for LanceDB. The
-# firnflow service is commented out until the API crate is wired up
-# — today only the cache layer exists and has no external runtime deps.
+# Local Firn stack: MinIO provides S3-compatible object storage and the
+# published Firn image provides the API. Override FIRNFLOW_IMAGE when testing
+# a locally-built image.
 
 services:
   minio:
@@ -37,9 +35,7 @@ services:
       "
 
   firnflow:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${FIRNFLOW_IMAGE:-ghcr.io/gordonmurray/firnflow:0.9.5}
     container_name: firnflow-api
     depends_on:
       minio-init:

@@ -10,7 +10,8 @@
 # glibc).
 #
 # Build with:  docker build -t firnflow-api .
-# Or via compose: `docker compose up --build firnflow`
+# The default compose stack uses the published image. To use this local build
+# with compose, tag it and set FIRNFLOW_IMAGE=firnflow:local.
 
 FROM rust:1.94-bookworm AS builder
 

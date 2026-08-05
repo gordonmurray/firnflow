@@ -4,6 +4,8 @@
 
 It pairs LanceDB (vector and BM25 search that runs directly on object storage) with foyer (a RAM + NVMe cache), so your data sits on cheap object storage while repeated queries are served from cache without a backend round-trip.
 
+Firn is aimed at teams that want self-hosted or BYO-cloud search without an always-on search cluster: multi-tenant SaaS workloads, private RAG deployments, and teams replacing an OpenSearch, Elasticsearch, Vespa, or custom vector-search service where idle cost and operational weight matter. It is an engine and a deployable service, not a hosted SaaS offering.
+
 ## Performance
 
 Benchmarked at 100,000 vectors of 1536 dimensions (OpenAI embedding size) against AWS S3 in `eu-west-1`:
@@ -182,13 +184,16 @@ Use `gs://...` rather than reaching for the GCS S3-interop endpoint. The interop
 ## Quickstart
 
 ### 1. Launch the Stack
-Everything you need (MinIO storage + Firn API) is orchestrated via Docker Compose:
+Everything you need (MinIO storage + Firn API) is orchestrated via Docker Compose. The default Compose file uses the published image, so this path does not compile Rust or Lance locally:
 
 ```bash
 git clone https://github.com/gordonmurray/firnflow
 cd firnflow
-docker compose up --build
+docker compose up -d
+curl http://localhost:3000/health
 ```
+
+The health check should return `ok`. MinIO is available at `http://localhost:9000` and its console at `http://localhost:9001` with `minioadmin` / `minioadmin`. To build the image from the checkout instead, run `docker build -t firnflow:local .` and start Compose with `FIRNFLOW_IMAGE=firnflow:local docker compose up -d`.
 
 ### 2. Upsert a Vector
 
@@ -221,7 +226,7 @@ Searching text needs an index first. Add `"text"` to a request and Firn scores i
 
 Add `"filter": "id > 1000"` or an `_ingested_at` predicate to scope vector, full-text, or hybrid search to matching rows. Filters use the same DataFusion SQL predicate dialect as `/list` and are applied before nearest-neighbour ranking, so vector queries return up to `k` neighbours that satisfy the predicate.
 
-A filtered request is cached by the exact text of its predicate. That is only safe when the predicate means the same thing every time it runs, so a filter calling a function whose result can move between two identical requests — `now()`, `current_timestamp`, `current_date`, `random()` — skips the result cache and always runs against the backend. Those queries stay correct at the cost of the cache's speedup; everything else keeps the fast path. The check plans the predicate rather than reading its text, so a column named `now` is still cached normally.
+A filtered request is cached by the exact text of its predicate. That is only safe when the predicate means the same thing every time it runs, so a filter calling a function whose result can move between two identical requests (`now()`, `current_timestamp`, `current_date`, `random()`) skips the result cache and always runs against the backend. Those queries stay correct at the cost of the cache's speedup; everything else keeps the fast path. The check plans the predicate rather than reading its text, so a column named `now` is still cached normally.
 
 If you are filtering on recency and want the cache, use a fixed bound your client computes (a literal `_ingested_at` microsecond value) rather than `now()`. Two requests a second apart then share a cache entry, where `now()` would correctly refuse to.
 
@@ -233,6 +238,26 @@ curl http://localhost:3000/metrics | grep s3_requests
 ```
 
 (The metric is named `firnflow_s3_requests_total` for dashboard continuity but counts requests against whichever backend the deployment is configured for.)
+
+Stop the local stack when you are finished:
+
+```bash
+docker compose down
+```
+
+## Why Firn
+
+Firn is a good fit when search data can live durably in object storage and query traffic is uneven across tenants or collections. The local RAM/NVMe tiers absorb hot traffic while inactive namespaces keep the low idle-cost profile of object storage. It combines dense vector, BM25, hybrid, and late-interaction multivector retrieval behind one service.
+
+Firn is not intended to replace every search platform. OpenSearch and Elasticsearch still have a broader operational ecosystem, Vespa has deeper ranking and real-time serving capabilities, and hosted object-storage search services may be preferable when operating infrastructure is not a goal. Firn's trade-off is a simpler self-hosted deployment with explicit object-storage economics and a smaller, focused API.
+
+## Current limitations
+
+- The server assumes one authoritative process per bucket; multi-node coordination is not yet part of the deployment contract.
+- The API is pre-1.0 and may change as the search and metadata model develops.
+- `/import` is insert-only; use `/upsert` for idempotent updates.
+- Per-row deletion and arbitrary user-defined metadata columns are not yet part of the current API.
+- An IVF_PQ index is recommended for practical cold-query latency on large object-storage-backed namespaces; exact search remains available when recall matters more than latency.
 
 ## Authentication
 

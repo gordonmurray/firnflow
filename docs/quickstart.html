@@ -46,7 +46,7 @@
 
   <main class="content">
     <h1>Quickstart</h1>
-    <p class="subtitle">Get Firn running locally with Docker. The first <code>docker compose up --build</code> compiles the server from source, so give it a few minutes; later starts take seconds.</p>
+    <p class="subtitle">Get a local object-storage-backed search API running in a few minutes with the published Firn image. No Rust toolchain or local compilation is required.</p>
 
     <h2>Prerequisites</h2>
     <ul>
@@ -55,16 +55,16 @@
 
     <div class="callout callout-info">
       <div class="callout-title">Default-open local stack</div>
-      This quickstart talks to a default-open local stack — no <code>Authorization</code> header is required. Before exposing Firn on a network you do not trust, set <code>FIRNFLOW_API_KEY</code> and send <code>Authorization: Bearer &lt;token&gt;</code> with every request. See <a href="deployment.html#authentication-and-rate-limiting">deployment</a> and <a href="configuration.html#authentication">configuration</a> for the full story.
+      This quickstart talks to a default-open local stack. No <code>Authorization</code> header is required. Before exposing Firn on a network you do not trust, set <code>FIRNFLOW_API_KEY</code> and send <code>Authorization: Bearer &lt;token&gt;</code> with every request. See <a href="deployment.html#authentication-and-rate-limiting">deployment</a> and <a href="configuration.html#authentication">configuration</a> for the full story.
     </div>
 
     <h2>1. Clone and start the stack</h2>
     <p>This launches MinIO (local S3) and the Firn API server together.</p>
     <pre><code>git clone https://github.com/gordonmurray/firnflow
 cd firnflow
-docker compose up --build</code></pre>
+docker compose up -d</code></pre>
 
-    <p>Once you see <code>listening on 0.0.0.0:3000</code>, the API is ready. MinIO is available at <code>localhost:9000</code> (API) and <code>localhost:9001</code> (console, credentials: <code>minioadmin</code> / <code>minioadmin</code>).</p>
+    <p>Check readiness with <code>curl http://localhost:3000/health</code>; the response should be <code>ok</code>. MinIO is available at <code>localhost:9000</code> (API) and <code>localhost:9001</code> (console, credentials: <code>minioadmin</code> / <code>minioadmin</code>). To test a local image build, run <code>docker build -t firnflow:local .</code> and start with <code>FIRNFLOW_IMAGE=firnflow:local docker compose up -d</code>.</p>
 
     <h2>2. Check health</h2>
     <pre><code>curl http://localhost:3000/health</code></pre>
@@ -98,7 +98,7 @@ docker compose up --build</code></pre>
     {"id": 2, "score": 0.99, "vector": [0.0, 1.0, ...], "text": null, "ingested_at_micros": 1718000000000000}
   ]
 }</code></pre>
-    <p>Hits carry the stored vector by default. If you only need ids, scores, and text, add <code>"include_vector": false</code> to the request — at realistic dimensions the vectors are most of the response bytes.</p>
+    <p>Hits carry the stored vector by default. If you only need ids, scores, and text, add <code>"include_vector": false</code> to the request. At realistic dimensions the vectors are most of the response bytes.</p>
 
     <div class="callout callout-info">
       <div class="callout-title">Cache in action</div>
@@ -174,10 +174,11 @@ firnflow_cached_handles ...</code></pre>
 
     <h2>Next steps</h2>
     <ul>
-      <li><a href="api.html">API reference</a> - all nine endpoints with full request and response schemas</li>
+      <li><a href="api.html">API reference</a> - the complete endpoint surface with request and response schemas</li>
       <li><a href="configuration.html">Configuration</a> - tune cache sizes, connect to AWS S3, native GCS, or any other supported object-storage backend</li>
       <li><a href="deployment.html">Deployment</a> - run Firn in production with Docker or on Kubernetes</li>
       <li><a href="monitoring.html">Monitoring</a> - Prometheus metrics, PromQL examples, and alerting rules</li>
+      <li><a href="https://pypi.org/project/firn/">Python package</a> - embed Firn directly in a Python process without running the API server</li>
     </ul>
 
   </main>
