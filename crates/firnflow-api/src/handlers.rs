@@ -711,7 +711,18 @@ pub async fn import(
         })?;
         reader.schema()
     };
-    validate_arrow_import_schema(&schema).map_err(ApiError::Core)?;
+    // Which columns the stream may carry depends on what the namespace
+    // has declared, so the declaration is read here too. The manager
+    // validates again against the set it holds when the append runs;
+    // this pass is what turns the common mistakes into a `400` instead
+    // of a failed background operation.
+    let declared = state
+        .manager
+        .attributes_for(&ns)
+        .await
+        .map_err(ApiError::Core)?
+        .unwrap_or_default();
+    validate_arrow_import_schema(&schema, &declared).map_err(ApiError::Core)?;
 
     let operation_id = state
         .operations

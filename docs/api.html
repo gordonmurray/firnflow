@@ -194,10 +194,11 @@
           <li><code>id</code> — <code>UInt64</code>, non-null.</li>
           <li>exactly one of <code>vector</code> (<code>FixedSizeList&lt;Float32, dim&gt;</code>, single-vector) or <code>vectors</code> (<code>List&lt;FixedSizeList&lt;Float32, dim&gt;&gt;</code>, multivector). The <code>FixedSizeList</code> child field must be named <code>item</code> (the default for e.g. PyArrow).</li>
           <li>optional <code>text</code> — <code>Utf8</code>.</li>
+          <li>optionally, any of the metadata columns declared on this namespace through <code>POST /ns/{namespace}/attributes</code>, each under its declared name and Arrow type: <code>string</code> as <code>Utf8</code>, <code>int</code> as <code>Int64</code>, <code>float</code> as <code>Float64</code>, <code>bool</code> as <code>Boolean</code>. A declared column the stream leaves out is null for every row it writes. Types must match exactly: unlike the JSON path, which widens an integer into a <code>float</code> column because JSON has a single number type, Arrow carries the type the caller chose, so an <code>Int64</code> array for a <code>float</code> column is a <code>400</code> rather than a conversion.</li>
           <li><code>_ingested_at</code> must <strong>not</strong> be present; the server sets it.</li>
           <li>any other column is rejected — a misspelled name is a <code>400</code>, not silently dropped. Vector floats must be non-null (no null child values inside a vector or sub-vector), and multivector rows must have at least one sub-vector.</li>
         </ul>
-        <p>On a fresh namespace the stream fixes the vector kind and dimension; on an existing one they must match. Schema problems are rejected with <code>400</code> before any work starts; row-level problems (null <code>id</code>, empty multivector row) and a truncated/malformed stream surface as a <strong>failed operation</strong> after the <code>202</code>.</p>
+        <p>On a fresh namespace the stream fixes the vector kind and dimension; on an existing one they must match. Because declaring a column needs a namespace that already exists, a namespace's very first write cannot carry attribute values: the order is import, declare, then import again with values, the same as on the JSON path. Schema problems are rejected with <code>400</code> before any work starts; row-level problems (null <code>id</code>, empty multivector row) and a truncated/malformed stream surface as a <strong>failed operation</strong> after the <code>202</code>.</p>
 
         <h4>Response (202)</h4>
         <pre><code>{
@@ -286,9 +287,10 @@ curl -X POST http://localhost:3000/ns/demo/import \
           <p>There is no schema read on the write path to check a name against, so a value for a column that has not been declared is rejected at the write rather than dropped. That applies to a JSON <code>null</code> too: it writes the same null an omitted name would, but naming a column that does not exist is still an error.</p>
         </div>
 
-        <div class="callout callout-warning">
-          <div class="callout-title">Bulk import does not carry values</div>
-          <code>POST /ns/{namespace}/import</code> writes nulls into every metadata column, so a corpus that needs metadata has to be written through <code>/upsert</code>. A bulk-loaded row will not match a predicate over an attribute column until it is rewritten.
+        <div class="callout callout-info">
+          <div class="callout-title">Bulk import carries values too</div>
+          <p><code>POST /ns/{namespace}/import</code> accepts declared columns in its Arrow schema, under the declared name and the Arrow type the declared type maps to. A column the stream omits is null for the rows it writes, and the types must match exactly, with none of the integer-to-float widening the JSON path does.</p>
+          <p>Declaring needs a namespace that already exists, so the first load into a new namespace still lands with nulls in every metadata column. Declare after that first write and the next import carries values.</p>
         </div>
       </div>
     </div>

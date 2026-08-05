@@ -4,9 +4,11 @@
 //! Offline tests (no MinIO) cover the synchronous rejections that fire
 //! before any storage is touched: wrong `Content-Type` (415), a body
 //! over `FIRNFLOW_IMPORT_MAX_BYTES` (413), and a malformed Arrow stream
-//! (400). The MinIO-gated test drives a real Arrow IPC body end to end:
+//! (400). The MinIO-gated tests drive a real Arrow IPC body end to end:
 //! 202 + `operation_id`, poll to `succeeded`, then confirm the rows
-//! landed in a single commit.
+//! landed in a single commit, and that a stream carrying declared
+//! metadata columns is filterable afterwards while an undeclared column
+//! is a synchronous 400.
 //!
 //! ```text
 //! docker compose up -d minio minio-init
@@ -17,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow_array::builder::{FixedSizeListBuilder, Float32Builder};
-use arrow_array::{RecordBatch, UInt64Array};
+use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray, UInt64Array};
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use axum::body::{Body, to_bytes};
@@ -104,6 +106,40 @@ fn single_batch(schema: &SchemaRef, ids: &[u64]) -> RecordBatch {
         vec![Arc::new(id_arr), Arc::new(list.finish())],
     )
     .unwrap()
+}
+
+/// The single-vector import schema with attribute columns appended.
+fn single_schema_with(extra: Vec<Field>) -> SchemaRef {
+    let mut fields = single_schema().fields().to_vec();
+    fields.extend(extra.into_iter().map(Arc::new));
+    Arc::new(Schema::new(fields))
+}
+
+/// A single-vector batch with attribute arrays appended, in the order
+/// `schema` lists them.
+fn single_batch_with(schema: &SchemaRef, ids: &[u64], extra: Vec<ArrayRef>) -> RecordBatch {
+    let base = single_batch(&single_schema(), ids);
+    let mut columns = base.columns().to_vec();
+    columns.extend(extra);
+    RecordBatch::try_new(schema.clone(), columns).unwrap()
+}
+
+/// Poll a `202`'s operation until it succeeds.
+async fn await_operation(app: &axum::Router, accepted: &Value) {
+    let op_id = accepted["operation_id"]
+        .as_str()
+        .expect("202 carries operation_id")
+        .to_string();
+    for _ in 0..600 {
+        let (s, op) = get(app.clone(), format!("/operations/{op_id}")).await;
+        assert_eq!(s, StatusCode::OK);
+        match op["status"].as_str() {
+            Some("succeeded") => return,
+            Some("failed") => panic!("operation failed: {op}"),
+            _ => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    panic!("operation {op_id} did not finish in time");
 }
 
 /// Serialize batches as an Arrow IPC stream (the `/import` wire format).
@@ -227,5 +263,93 @@ async fn import_arrow_stream_lands_in_one_commit() {
         info["row_count"].as_u64().unwrap(),
         8,
         "all 8 rows imported"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn import_carries_declared_attributes_and_filters_on_them() {
+    let (state, _tmp) = test_state().await;
+    let app = router(state);
+    let ns = unique_namespace("import-attrs");
+    let schema = single_schema();
+
+    // A namespace has to exist before its columns can be declared, so
+    // the first load is the one that cannot carry values.
+    let body = arrow_ipc(&schema, &[single_batch(&schema, &[0])]);
+    let (status, accepted) =
+        post_bytes(app.clone(), format!("/ns/{ns}/import"), ARROW_CT, body).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "seed import: {accepted}");
+    await_operation(&app, &accepted).await;
+
+    // Before the declaration, an attribute column is an unknown column,
+    // and the rejection is a synchronous 400 rather than a 202 whose
+    // operation fails later.
+    let attr_schema = single_schema_with(vec![
+        Field::new("section", DataType::Utf8, true),
+        Field::new("year", DataType::Int64, true),
+    ]);
+    let attr_batch = single_batch_with(
+        &attr_schema,
+        &[10, 11],
+        vec![
+            Arc::new(StringArray::from(vec!["warnings", "dosage"])),
+            Arc::new(Int64Array::from(vec![2024_i64, 2025])),
+        ],
+    );
+    let body = arrow_ipc(&attr_schema, std::slice::from_ref(&attr_batch));
+    let (status, err) = post_bytes(app.clone(), format!("/ns/{ns}/import"), ARROW_CT, body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an undeclared column must be a 400: {err}"
+    );
+
+    let (status, declared) = post_bytes(
+        app.clone(),
+        format!("/ns/{ns}/attributes"),
+        "application/json",
+        br#"{"attributes":[{"name":"section","type":"string"},{"name":"year","type":"int"}]}"#
+            .to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "declare attributes: {declared}");
+
+    // Same stream again, now that the columns exist.
+    let body = arrow_ipc(&attr_schema, &[attr_batch]);
+    let (status, accepted) =
+        post_bytes(app.clone(), format!("/ns/{ns}/import"), ARROW_CT, body).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "import with values: {accepted}"
+    );
+    await_operation(&app, &accepted).await;
+
+    // A filter over an imported value matches without the rows having
+    // been rewritten through /upsert first.
+    let (status, page) = post_bytes(
+        app.clone(),
+        format!("/ns/{ns}/query"),
+        "application/json",
+        br#"{"vector":[1.0,0.0,0.0,0.0],"k":10,"filter":"section = 'dosage'"}"#.to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "filtered query: {page}");
+    let results = page["results"].as_array().expect("results array");
+    let ids: Vec<u64> = results
+        .iter()
+        .map(|r| r["id"].as_u64().expect("id"))
+        .collect();
+    assert_eq!(ids, vec![11], "only the matching imported row: {page}");
+    assert_eq!(
+        results[0]["attributes"]["year"].as_i64(),
+        Some(2025),
+        "values come back on the hit: {page}"
+    );
+    assert_eq!(
+        results[0]["attributes"]["section"].as_str(),
+        Some("dosage"),
+        "values come back on the hit: {page}"
     );
 }

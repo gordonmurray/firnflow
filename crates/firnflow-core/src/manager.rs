@@ -934,23 +934,35 @@ impl NamespaceManager {
     /// lookup — build indexes after the load, per the large-ingest
     /// recipe). Returns the number of rows appended.
     ///
-    /// Attribute columns are written as nulls. The stream schema does
-    /// not carry attribute values yet, so a namespace with declared
-    /// attributes can still be bulk-loaded, but the loaded rows will
-    /// not match a predicate over those columns until they are
-    /// rewritten through [`upsert`](Self::upsert).
+    /// The stream may carry the namespace's declared attribute columns
+    /// alongside the engine ones, under the name and Arrow type they
+    /// were declared with; a declared column the stream omits is null
+    /// for every row it writes. Declaring needs a namespace that
+    /// already exists, so a namespace's first write cannot carry
+    /// attribute values, and the order is import, declare, import
+    /// again with values, matching the JSON path.
     pub async fn import_arrow(
         &self,
         ns: &NamespaceId,
         reader: Box<dyn RecordBatchReader + Send>,
     ) -> Result<usize, FirnflowError> {
         let in_schema = reader.schema();
-        let (kind, dim, has_text) = validate_arrow_import_schema(&in_schema)?;
+
+        // Resolve before validating: which columns the stream is
+        // allowed to carry depends on what this namespace has declared,
+        // so the schema cannot be judged without it.
+        let resolved = self.resolve_schema_info(ns).await?;
+        let is_fresh = resolved.is_none();
+        let (kind, dim, has_text) = {
+            let declared: &[AttributeColumn] = match &resolved {
+                Some(info) => &info.attributes,
+                None => &[],
+            };
+            validate_arrow_import_schema(&in_schema, declared)?
+        };
 
         // Fresh namespace: the stream fixes kind/dim. Existing: it must
         // match the established shape.
-        let resolved = self.resolve_schema_info(ns).await?;
-        let is_fresh = resolved.is_none();
         let info = match resolved {
             Some(info) => {
                 if info.kind != kind || info.dim != dim {
@@ -991,6 +1003,15 @@ impl NamespaceManager {
             None
         };
 
+        // Each declared column paired with where the stream carries it,
+        // resolved once here rather than by name per batch. `None` is a
+        // column the caller left out, written as nulls.
+        let attributes: Vec<(AttributeColumn, Option<usize>)> = info
+            .attributes
+            .iter()
+            .map(|column| (column.clone(), in_schema.index_of(&column.name).ok()))
+            .collect();
+
         let rows = Arc::new(AtomicU64::new(0));
         let ingest = IngestReader {
             inner: reader,
@@ -1001,7 +1022,7 @@ impl NamespaceManager {
             text_idx,
             ts_micros: current_micros(),
             rows: Arc::clone(&rows),
-            attributes: Arc::clone(&info.attributes),
+            attributes,
         };
 
         // One append commit for the whole stream. `WriteParams::default()`
@@ -2087,11 +2108,25 @@ fn list_of_fixed_size_float_dim(dt: &DataType) -> Option<usize> {
 /// match Firn's canonical shape exactly (child field `item`, `Float32`)
 /// so Lance appends it without a cast.
 ///
+/// The stream may also carry any of the namespace's `declared`
+/// attribute columns, under the name and Arrow type they were declared
+/// with. A declared column the stream leaves out is written as null for
+/// every row, the same as an attribute omitted from an `/upsert` row.
+///
+/// Attribute types must match exactly: an `int` column must arrive as
+/// `Int64`, a `float` column as `Float64`. The JSON path widens an
+/// integer into a `float` column because JSON has one number type and
+/// `1` for a float column is not a mistake. Arrow carries the type the
+/// caller chose, so there is nothing to infer, and this path already
+/// demands the exact element type on the vector column so Lance appends
+/// the batch without a cast.
+///
 /// Returns [`FirnflowError::InvalidRequest`] for any missing, extra, or
 /// mistyped column, letting the API layer answer `400` before it starts
 /// the background import.
 pub fn validate_arrow_import_schema(
     schema: &Schema,
+    declared: &[AttributeColumn],
 ) -> Result<(VectorKind, usize, bool), FirnflowError> {
     match schema.column_with_name("id") {
         Some((_, f)) if f.data_type() == &DataType::UInt64 => {}
@@ -2188,23 +2223,40 @@ pub fn validate_arrow_import_schema(
     };
 
     // Reject unknown columns so a misspelled name (or stray data the
-    // server would otherwise silently drop) is a clear 400. Only `id`,
-    // one of `vector`/`vectors`, and `text` are read. Arrow permits
+    // server would otherwise silently drop) is a clear 400. The engine
+    // reads `id`, one of `vector`/`vectors`, and `text`; anything else
+    // has to be a column this namespace declared. Arrow permits
     // duplicate field names and column lookup returns the first match,
     // so a repeated column would silently shadow data — reject those too.
-    const ALLOWED: &[&str] = &["id", "vector", "vectors", "text"];
+    const ENGINE_COLUMNS: &[&str] = &["id", "vector", "vectors", "text"];
     let mut seen = HashSet::new();
     for field in schema.fields() {
         let name = field.name().as_str();
-        if !ALLOWED.contains(&name) {
-            return Err(FirnflowError::InvalidRequest(format!(
-                "import: unexpected column `{name}`; allowed columns are `id`, \
-                 one of `vector`/`vectors`, and optional `text`"
-            )));
-        }
         if !seen.insert(name) {
             return Err(FirnflowError::InvalidRequest(format!(
                 "import: duplicate column `{name}`; each column may appear at most once"
+            )));
+        }
+        if ENGINE_COLUMNS.contains(&name) {
+            continue;
+        }
+        let Some(column) = declared.iter().find(|c| c.name == name) else {
+            let known: Vec<&str> = declared.iter().map(|c| c.name.as_str()).collect();
+            return Err(FirnflowError::InvalidRequest(format!(
+                "import: unexpected column `{name}`; the engine columns are `id`, \
+                 one of `vector`/`vectors`, and optional `text`, and the attributes \
+                 declared on this namespace are {known:?} (declare a new one with \
+                 POST /ns/{{namespace}}/attributes)"
+            )));
+        };
+        let want = column.ty.arrow_type();
+        if field.data_type() != &want {
+            return Err(FirnflowError::InvalidRequest(format!(
+                "import: column `{name}` is declared {} on this namespace, so it must be \
+                 Arrow {want:?}, got {:?}; /import takes the declared type exactly and \
+                 does not convert",
+                column.ty.as_label(),
+                field.data_type(),
             )));
         }
     }
@@ -2304,8 +2356,9 @@ struct IngestReader {
     text_idx: Option<usize>,
     ts_micros: i64,
     rows: Arc<AtomicU64>,
-    /// Declared attribute columns, filled with nulls on this path.
-    attributes: Arc<[AttributeColumn]>,
+    /// Declared attribute columns, each with its position in the
+    /// incoming batch, or `None` for one the stream does not carry.
+    attributes: Vec<(AttributeColumn, Option<usize>)>,
 }
 
 impl IngestReader {
@@ -2395,11 +2448,18 @@ impl IngestReader {
         ));
 
         let mut columns = vec![id, vector, text, ts];
-        // Declared attribute columns are filled with nulls: the import
-        // stream does not carry attribute values yet, and the batch
-        // still has to match the table's schema column for column.
-        for column in self.attributes.iter() {
-            columns.push(new_null_array(&column.ty.arrow_type(), n));
+        // Declared attribute columns, in table order, taken from the
+        // stream where it carries them and null-filled where it does
+        // not. Order matters: the batch has to match the table's schema
+        // column for column, and the incoming stream may list its
+        // columns in any order. Types were checked against the
+        // declaration when the stream schema was validated, and
+        // `RecordBatch::try_new` below re-checks them per batch.
+        for (column, idx) in &self.attributes {
+            columns.push(match idx {
+                Some(i) => batch.column(*i).clone(),
+                None => new_null_array(&column.ty.arrow_type(), n),
+            });
         }
 
         let out = RecordBatch::try_new(self.canonical.clone(), columns)?;
@@ -2839,7 +2899,7 @@ mod tests {
             Field::new("vector", single_vec.clone(), false),
         ]);
         assert_eq!(
-            validate_arrow_import_schema(&s).unwrap(),
+            validate_arrow_import_schema(&s, &[]).unwrap(),
             (VectorKind::Single, 4, false)
         );
 
@@ -2850,7 +2910,7 @@ mod tests {
             Field::new("text", DataType::Utf8, true),
         ]);
         assert_eq!(
-            validate_arrow_import_schema(&s).unwrap(),
+            validate_arrow_import_schema(&s, &[]).unwrap(),
             (VectorKind::Multivector, 4, true)
         );
 
@@ -2911,11 +2971,84 @@ mod tests {
         for (i, s) in rejected.iter().enumerate() {
             assert!(
                 matches!(
-                    validate_arrow_import_schema(s),
+                    validate_arrow_import_schema(s, &[]),
                     Err(FirnflowError::InvalidRequest(_))
                 ),
                 "schema #{i} should have been rejected"
             );
+        }
+    }
+
+    #[test]
+    fn import_schema_validation_against_declared_attributes() {
+        let single_vec = NamespaceManager::schema_for_kind(VectorKind::Single, 4, false)
+            .field(1)
+            .data_type()
+            .clone();
+        let declared = [
+            AttributeColumn::new("section", AttributeType::String),
+            AttributeColumn::new("year", AttributeType::Int),
+            AttributeColumn::new("score", AttributeType::Float),
+        ];
+        let base = |extra: Vec<Field>| {
+            let mut fields = vec![
+                Field::new("id", DataType::UInt64, false),
+                Field::new("vector", single_vec.clone(), false),
+            ];
+            fields.extend(extra);
+            Schema::new(fields)
+        };
+
+        // A declared column, at its declared type, is accepted.
+        let s = base(vec![
+            Field::new("section", DataType::Utf8, true),
+            Field::new("year", DataType::Int64, true),
+        ]);
+        assert_eq!(
+            validate_arrow_import_schema(&s, &declared).unwrap(),
+            (VectorKind::Single, 4, false)
+        );
+
+        // Carrying none of them is fine; those rows are null.
+        assert!(validate_arrow_import_schema(&base(vec![]), &declared).is_ok());
+
+        // A declared name is only declared for the namespace that
+        // declared it: the same schema against a bare namespace is the
+        // unknown-column rejection.
+        let err = validate_arrow_import_schema(&s, &[]).unwrap_err();
+        match err {
+            FirnflowError::InvalidRequest(msg) => {
+                assert!(msg.contains("unexpected column"), "{msg}")
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+
+        // Wrong Arrow type for a declared column names both types.
+        let s = base(vec![Field::new("year", DataType::Int32, true)]);
+        let err = validate_arrow_import_schema(&s, &declared).unwrap_err();
+        match err {
+            FirnflowError::InvalidRequest(msg) => {
+                assert!(msg.contains("declared int"), "{msg}");
+                assert!(msg.contains("Int32"), "{msg}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+
+        // No widening here, unlike the JSON path: an `int` array for a
+        // `float` column is the caller's type choice, not JSON's single
+        // number type, so it is a rejection rather than a cast.
+        let s = base(vec![Field::new("score", DataType::Int64, true)]);
+        assert!(validate_arrow_import_schema(&s, &declared).is_err());
+
+        // A misspelled attribute lists the ones that exist.
+        let s = base(vec![Field::new("sectoin", DataType::Utf8, true)]);
+        let err = validate_arrow_import_schema(&s, &declared).unwrap_err();
+        match err {
+            FirnflowError::InvalidRequest(msg) => {
+                assert!(msg.contains("unexpected column"), "{msg}");
+                assert!(msg.contains("section"), "{msg}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
         }
     }
 

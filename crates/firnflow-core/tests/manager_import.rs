@@ -12,6 +12,9 @@
 //! 3. Row-level validation rejects null ids, null float values inside a
 //!    vector or sub-vector, and empty multivector rows as
 //!    `InvalidRequest`.
+//! 4. Declared attribute columns are carried through the stream and are
+//!    filterable afterwards, while a column the namespace has not
+//!    declared, or one sent at the wrong Arrow type, is rejected.
 //!
 //! Gated `#[ignore]`: needs MinIO up.
 //!
@@ -25,10 +28,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_array::builder::{FixedSizeListBuilder, Float32Builder, ListBuilder};
-use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader, UInt64Array};
+use arrow_array::{
+    ArrayRef, BooleanArray, Int64Array, RecordBatch, RecordBatchIterator, RecordBatchReader,
+    StringArray, UInt64Array,
+};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use firnflow_core::metrics::test_metrics;
-use firnflow_core::{FirnflowError, NamespaceId, NamespaceManager, StorageRoot};
+use firnflow_core::{
+    AttributeColumn, AttributeType, AttributeValue, FirnflowError, NamespaceId, NamespaceManager,
+    StorageRoot,
+};
 
 const DIM: usize = 8;
 
@@ -150,6 +159,207 @@ fn reader(schema: SchemaRef, batches: Vec<RecordBatch>) -> Box<dyn RecordBatchRe
         batches.into_iter().map(Ok),
         schema,
     ))
+}
+
+/// The single-vector import schema with attribute columns appended.
+fn single_schema_with(extra: Vec<Field>) -> SchemaRef {
+    let mut fields = vec![
+        Field::new("id", DataType::UInt64, false),
+        Field::new(
+            "vector",
+            DataType::FixedSizeList(float32_item(), DIM as i32),
+            false,
+        ),
+    ];
+    fields.extend(extra);
+    Arc::new(Schema::new(fields))
+}
+
+/// A single-vector batch with attribute arrays appended, in the order
+/// `schema` lists them.
+fn single_batch_with(schema: &SchemaRef, ids: &[u64], extra: Vec<ArrayRef>) -> RecordBatch {
+    let base = single_batch(&single_schema(), ids);
+    let mut columns = base.columns().to_vec();
+    columns.extend(extra);
+    RecordBatch::try_new(schema.clone(), columns).unwrap()
+}
+
+/// A query vector: unit on one axis, matching how `single_batch`
+/// builds the stored rows.
+fn unit_vector(axis: usize) -> Vec<f32> {
+    let mut v = vec![0.0_f32; DIM];
+    v[axis] = 1.0;
+    v
+}
+
+/// The four attribute columns these tests declare.
+fn declaration() -> Vec<AttributeColumn> {
+    vec![
+        AttributeColumn::new("section", AttributeType::String),
+        AttributeColumn::new("year", AttributeType::Int),
+        AttributeColumn::new("score", AttributeType::Float),
+        AttributeColumn::new("archived", AttributeType::Bool),
+    ]
+}
+
+/// Seed a namespace with one row so it exists, since attributes can
+/// only be declared on a namespace that does.
+async fn seed(mgr: &NamespaceManager, ns: &NamespaceId) {
+    let schema = single_schema();
+    mgr.import_arrow(
+        ns,
+        reader(schema.clone(), vec![single_batch(&schema, &[0])]),
+    )
+    .await
+    .expect("seed import");
+}
+
+#[tokio::test]
+#[ignore]
+async fn import_carries_declared_attribute_values() {
+    let mgr = manager();
+    let ns = NamespaceId::new(unique_namespace("import-attrs")).unwrap();
+
+    seed(&mgr, &ns).await;
+    mgr.declare_attributes(&ns, &declaration())
+        .await
+        .expect("declare");
+
+    // Three of the four declared columns. `score` is left out of the
+    // stream entirely, which must land as null rather than as an error.
+    let schema = single_schema_with(vec![
+        Field::new("section", DataType::Utf8, true),
+        Field::new("year", DataType::Int64, true),
+        Field::new("archived", DataType::Boolean, true),
+    ]);
+    let batch = single_batch_with(
+        &schema,
+        &[10, 11],
+        vec![
+            Arc::new(StringArray::from(vec!["warnings", "dosage"])),
+            Arc::new(Int64Array::from(vec![2024_i64, 2025])),
+            Arc::new(BooleanArray::from(vec![false, true])),
+        ],
+    );
+    let imported = mgr
+        .import_arrow(&ns, reader(schema, vec![batch]))
+        .await
+        .expect("import with attributes");
+    assert_eq!(imported, 2);
+
+    let by_id: HashMap<u64, _> = mgr
+        .query(&ns, unit_vector(0), None, 10, None, None, None, true)
+        .await
+        .expect("query")
+        .results
+        .into_iter()
+        .map(|r| (r.id, r))
+        .collect();
+
+    let hit = by_id.get(&10).expect("row 10 imported");
+    assert_eq!(
+        hit.attributes.get("section"),
+        Some(&AttributeValue::String("warnings".into()))
+    );
+    assert_eq!(hit.attributes.get("year"), Some(&AttributeValue::Int(2024)));
+    assert_eq!(
+        hit.attributes.get("archived"),
+        Some(&AttributeValue::Bool(false))
+    );
+    assert_eq!(
+        hit.attributes.get("score"),
+        None,
+        "a column the stream omitted reads back null, so it is absent"
+    );
+
+    let hit = by_id.get(&11).expect("row 11 imported");
+    assert_eq!(
+        hit.attributes.get("year"),
+        Some(&AttributeValue::Int(2025)),
+        "values follow their own row rather than the first row's"
+    );
+
+    // The row written before the declaration existed carries nothing.
+    assert!(
+        by_id.get(&0).expect("seeded row").attributes.is_empty(),
+        "a row written before the columns were declared holds nulls"
+    );
+
+    // The point of carrying the values: a predicate over them matches
+    // imported rows without rewriting them through `/upsert` first.
+    let filtered = mgr
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            10,
+            None,
+            None,
+            Some("section = 'dosage'".into()),
+            true,
+        )
+        .await
+        .expect("filtered query")
+        .results;
+    let ids: Vec<u64> = filtered.iter().map(|r| r.id).collect();
+    assert_eq!(ids, vec![11], "only the matching imported row comes back");
+}
+
+#[tokio::test]
+#[ignore]
+async fn import_rejects_undeclared_and_mistyped_attribute_columns() {
+    let mgr = manager();
+    let ns = NamespaceId::new(unique_namespace("import-attrs-bad")).unwrap();
+
+    seed(&mgr, &ns).await;
+
+    // Before any declaration, an attribute column is just an unknown
+    // column, and unknown columns are rejected rather than dropped.
+    let schema = single_schema_with(vec![Field::new("section", DataType::Utf8, true)]);
+    let batch = single_batch_with(
+        &schema,
+        &[1],
+        vec![Arc::new(StringArray::from(vec!["warnings"]))],
+    );
+    let err = mgr
+        .import_arrow(&ns, reader(schema.clone(), vec![batch]))
+        .await
+        .expect_err("undeclared column must be rejected");
+    match err {
+        FirnflowError::InvalidRequest(msg) => assert!(msg.contains("unexpected column"), "{msg}"),
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+
+    mgr.declare_attributes(&ns, &declaration())
+        .await
+        .expect("declare");
+
+    // Declared now, so the same stream is accepted.
+    let batch = single_batch_with(
+        &schema,
+        &[1],
+        vec![Arc::new(StringArray::from(vec!["warnings"]))],
+    );
+    mgr.import_arrow(&ns, reader(schema, vec![batch]))
+        .await
+        .expect("declared column is accepted");
+
+    // An integer array for a `float` column is a rejection, not the
+    // widening the JSON path does: Arrow states the type the caller
+    // chose, so there is nothing to infer.
+    let schema = single_schema_with(vec![Field::new("score", DataType::Int64, true)]);
+    let batch = single_batch_with(&schema, &[2], vec![Arc::new(Int64Array::from(vec![3_i64]))]);
+    let err = mgr
+        .import_arrow(&ns, reader(schema, vec![batch]))
+        .await
+        .expect_err("Int64 for a float column must be rejected");
+    match err {
+        FirnflowError::InvalidRequest(msg) => {
+            assert!(msg.contains("declared float"), "{msg}");
+            assert!(msg.contains("Int64"), "{msg}");
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
 }
 
 #[tokio::test]

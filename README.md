@@ -256,7 +256,7 @@ Firn is not intended to replace every search platform. OpenSearch and Elasticsea
 
 - The server assumes one authoritative process per bucket; multi-node coordination is not yet part of the deployment contract.
 - The API is pre-1.0 and may change as the search and metadata model develops.
-- `/import` is insert-only; use `/upsert` for idempotent updates, and note that it writes nulls into [metadata columns](#metadata-columns) rather than carrying values.
+- `/import` is insert-only; use `/upsert` for idempotent updates.
 - Metadata columns are scalars: `string`, `int`, `float`, and `bool`. Lists, nested objects, and timestamps are not modelled, and neither are facet counts over a filtered set.
 - Per-row deletion is not yet part of the current API.
 - An IVF_PQ index is recommended for practical cold-query latency on large object-storage-backed namespaces; exact search remains available when recall matters more than latency.
@@ -370,7 +370,9 @@ Values come back on `/query` hits and `/list` rows as bare JSON scalars:
  "attributes": {"section": "warnings", "year": 2024, "archived": false}}
 ```
 
-Two things are worth knowing before building on this. `/import` does not carry attribute values: a bulk-loaded row lands with nulls in every metadata column, so a corpus that needs metadata has to come in through `/upsert` for now. And filtering is a scan over the matching rows unless the column is indexed, so `POST /ns/{ns}/scalar-index` with `{"column": "section"}` is worth building on any column a workload filters by regularly.
+Filtering is a scan over the matching rows unless the column is indexed, so `POST /ns/{ns}/scalar-index` with `{"column": "section"}` is worth building on any column a workload filters by regularly.
+
+`POST /ns/{ns}/import` carries attribute values as well, as extra columns in its Arrow schema under the declared name and the Arrow type the declared type maps to (`string` as `Utf8`, `int` as `Int64`, `float` as `Float64`, `bool` as `Boolean`). A declared column the stream omits is null for the rows it writes. Types have to match exactly there: the JSON path widens an integer into a `float` column because JSON has one number type, while Arrow carries the type the caller picked, so an `Int64` array for a `float` column is rejected rather than converted. Declaring needs a namespace that already exists, so the first load into a new namespace still lands with nulls; declare after it and the next import carries values.
 
 ## Multivector namespaces
 
