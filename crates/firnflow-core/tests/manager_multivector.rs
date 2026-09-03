@@ -175,6 +175,7 @@ async fn upsert_then_query_returns_multivector_hits() {
             None,
             true,
             false,
+            None,
         )
         .await
         .expect("brute-force multivector query");
@@ -215,6 +216,7 @@ async fn upsert_then_query_returns_multivector_hits() {
             None,
             true,
             false,
+            None,
         )
         .await
         .expect("indexed multivector query");
@@ -258,7 +260,7 @@ async fn single_payload_rejected_on_multivector_namespace() {
 
     // Same on the query side.
     let err = manager
-        .query(&ns, unit(0), None, 2, None, None, None, true, false)
+        .query(&ns, unit(0), None, 2, None, None, None, true, false, None)
         .await
         .expect_err("single query on multivector namespace must fail");
     let msg = format!("{err}");
@@ -306,6 +308,7 @@ async fn multi_payload_rejected_on_single_namespace() {
             None,
             true,
             false,
+            None,
         )
         .await
         .expect_err("multivector query on single namespace must fail");
@@ -402,6 +405,7 @@ async fn create_index_forces_cosine_on_multivector() {
             None,
             true,
             false,
+            None,
         )
         .await
         .expect("post-index multivector query");

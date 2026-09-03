@@ -165,7 +165,18 @@ async fn a_second_declaration_adds_to_the_first() {
 
     // The rows written before the column existed read back without it.
     let hits = manager
-        .query(&ns, unit_vector(0), None, 3, None, None, None, true, false)
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            3,
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+        )
         .await
         .expect("query");
     let first = hits.results.first().expect("a hit");
@@ -211,7 +222,18 @@ async fn illegal_names_are_rejected_before_any_write() {
 async fn values_come_back_on_query_results() {
     let (manager, ns, _dir) = seeded().await;
     let results = manager
-        .query(&ns, unit_vector(0), None, 3, None, None, None, true, false)
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            3,
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+        )
         .await
         .expect("query")
         .results;
@@ -244,7 +266,18 @@ async fn values_come_back_on_query_results() {
 async fn a_vector_light_query_still_carries_attributes() {
     let (manager, ns, _dir) = seeded().await;
     let results = manager
-        .query(&ns, unit_vector(0), None, 3, None, None, None, false, false)
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            3,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        )
         .await
         .expect("query")
         .results;
@@ -272,6 +305,7 @@ async fn a_filter_over_an_attribute_narrows_the_result_set() {
             None,
             false,
             false,
+            None,
         )
         .await
         .expect("unfiltered")
@@ -289,6 +323,7 @@ async fn a_filter_over_an_attribute_narrows_the_result_set() {
             Some("section = 'warnings'".into()),
             false,
             false,
+            None,
         )
         .await
         .expect("filtered")
@@ -310,6 +345,7 @@ async fn a_filter_over_an_attribute_narrows_the_result_set() {
             Some("year >= 2025".into()),
             false,
             false,
+            None,
         )
         .await
         .expect("range filter")
@@ -327,6 +363,7 @@ async fn a_filter_over_an_attribute_narrows_the_result_set() {
             Some("archived = false".into()),
             false,
             false,
+            None,
         )
         .await
         .expect("bool filter")
@@ -370,7 +407,18 @@ async fn an_integer_written_to_a_float_column_is_widened() {
         .expect("an int is a legal float");
 
     let results = manager
-        .query(&ns, unit_vector(3), None, 1, None, None, None, false, false)
+        .query(
+            &ns,
+            unit_vector(3),
+            None,
+            1,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        )
         .await
         .expect("query")
         .results;
@@ -412,6 +460,7 @@ async fn re_upserting_without_attributes_clears_them() {
             Some("id = 1".into()),
             false,
             false,
+            None,
         )
         .await
         .expect("query")
@@ -465,6 +514,7 @@ async fn a_scalar_index_can_be_built_on_an_attribute_column() {
             Some("section = 'warnings'".into()),
             false,
             false,
+            None,
         )
         .await
         .expect("filtered")
@@ -523,6 +573,7 @@ async fn import_into_a_namespace_with_attributes_writes_nulls() {
             Some("id = 99".into()),
             false,
             false,
+            None,
         )
         .await
         .expect("query")
@@ -545,6 +596,7 @@ async fn import_into_a_namespace_with_attributes_writes_nulls() {
             Some("section = 'warnings'".into()),
             false,
             false,
+            None,
         )
         .await
         .expect("filtered")

@@ -92,6 +92,7 @@ fn semantic_request(vector: Vec<f32>, threshold: Option<f32>) -> QueryRequest {
             min_similarity: threshold,
         }),
         exact: false,
+        refine_factor: None,
     }
 }
 
@@ -106,6 +107,7 @@ fn plain_request(vector: Vec<f32>) -> QueryRequest {
         include_vector: true,
         semantic_cache: None,
         exact: false,
+        refine_factor: None,
     }
 }
 
@@ -268,6 +270,7 @@ async fn k_mismatch_does_not_reuse() {
             min_similarity: Some(0.95),
         }),
         exact: false,
+        refine_factor: None,
     };
     service.query(&ns, &seed).await.expect("seed query");
 
@@ -286,6 +289,7 @@ async fn k_mismatch_does_not_reuse() {
             min_similarity: Some(0.95),
         }),
         exact: false,
+        refine_factor: None,
     };
     let _ = service.query(&ns, &probe).await.expect("k-mismatch query");
     assert_eq!(metrics.semantic_cache_hits_value(&ns), 0);
@@ -312,6 +316,7 @@ async fn ineligible_request_returns_400_at_service_boundary() {
             min_similarity: None,
         }),
         exact: false,
+        refine_factor: None,
     };
     let err = service.query(&ns, &req).await.unwrap_err();
     let msg = format!("{err}");

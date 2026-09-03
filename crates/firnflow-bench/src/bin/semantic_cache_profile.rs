@@ -390,6 +390,7 @@ fn vector_query(
             min_similarity: Some(threshold),
         }),
         exact: false,
+        refine_factor: None,
     }
 }
 
@@ -430,6 +431,7 @@ async fn true_query(
             None,
             true,
             false,
+            None,
         )
         .await
         .map_err(|e| anyhow::anyhow!("manager query: {e}"))

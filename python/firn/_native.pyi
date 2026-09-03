@@ -32,6 +32,7 @@ class Collection:
         filter: Optional[str] = None,
         include_vectors: bool = False,
         exact: bool = False,
+        refine_factor: Optional[int] = None,
     ) -> list[Hit]: ...
 
 class Client:
@@ -55,6 +56,7 @@ class Client:
         filter: Optional[str] = None,
         include_vectors: bool = False,
         exact: bool = False,
+        refine_factor: Optional[int] = None,
     ) -> list[Hit]: ...
     def close(self) -> None: ...
     def __enter__(self) -> "Client": ...

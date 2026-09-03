@@ -1258,6 +1258,7 @@ impl NamespaceManager {
         filter: Option<String>,
         include_vector: bool,
         exact: bool,
+        refine_factor: Option<u32>,
     ) -> Result<QueryResultSet, FirnflowError> {
         let info = match self.resolve_schema_info(ns).await? {
             Some(info) => info,
@@ -1399,6 +1400,9 @@ impl NamespaceManager {
                 vq = vq.bypass_vector_index();
             } else {
                 vq = vq.nprobes(nprobes);
+                if let Some(rf) = refine_factor {
+                    vq = vq.refine_factor(rf);
+                }
             }
             vq = vq.limit(k);
             if let Some(ref t) = text {

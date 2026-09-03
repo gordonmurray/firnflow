@@ -117,6 +117,7 @@ async fn service_query_happy_path() {
         include_vector: true,
         semantic_cache: None,
         exact: false,
+        refine_factor: None,
     };
     let res = service.query(&ns, &req).await.expect("query");
     assert_eq!(res.results.len(), 4, "expected 4 hits for k=4");

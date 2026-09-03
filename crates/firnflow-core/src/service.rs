@@ -387,6 +387,7 @@ impl NamespaceService {
                 req.filter.clone(),
                 req.include_vector,
                 req.exact,
+                req.refine_factor,
             )
             .await?;
         let bytes = encode_payload(&result)?;
@@ -600,6 +601,9 @@ pub fn hash_query_for_cache(req: &QueryRequest) -> Result<QueryHash, FirnflowErr
         // live lookup. If exact queries are ever cached, the two result
         // sets must not collide on the same key.
         exact: bool,
+        // A refined result at factor N is a different payload from
+        // an unrefined result for the same query; they must not collide.
+        refine_factor: Option<u32>,
     }
     let canonical = Canonical {
         vector: &req.vector,
@@ -610,6 +614,7 @@ pub fn hash_query_for_cache(req: &QueryRequest) -> Result<QueryHash, FirnflowErr
         filter: &req.filter,
         include_vector: req.include_vector,
         exact: req.exact,
+        refine_factor: req.refine_factor,
     };
     let bytes = bincode::serde::encode_to_vec(&canonical, config::standard())
         .map_err(|e| FirnflowError::Backend(format!("encode query: {e}")))?;
@@ -659,6 +664,7 @@ mod tests {
             include_vector: true,
             semantic_cache: None,
             exact: false,
+            refine_factor: None,
         }
     }
 
@@ -669,6 +675,15 @@ mod tests {
         exact_req.exact = true;
         let with_exact = hash_query_for_cache(&exact_req).unwrap();
         assert_ne!(base, with_exact);
+    }
+
+    #[test]
+    fn refine_factor_changes_cache_key() {
+        let base = hash_query_for_cache(&req_with_filter(None)).unwrap();
+        let mut refined = req_with_filter(None);
+        refined.refine_factor = Some(5);
+        let with_refine = hash_query_for_cache(&refined).unwrap();
+        assert_ne!(base, with_refine);
     }
 
     #[test]

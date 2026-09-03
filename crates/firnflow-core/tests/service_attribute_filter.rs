@@ -40,6 +40,7 @@ fn request(filter: Option<&str>) -> QueryRequest {
         include_vector: false,
         semantic_cache: None,
         exact: false,
+        refine_factor: None,
     }
 }
 
