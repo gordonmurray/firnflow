@@ -165,7 +165,18 @@ async fn a_second_declaration_adds_to_the_first() {
 
     // The rows written before the column existed read back without it.
     let hits = manager
-        .query(&ns, unit_vector(0), None, 3, None, None, None, true, false)
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            3,
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+        )
         .await
         .expect("query");
     let first = hits.results.first().expect("a hit");
@@ -211,7 +222,18 @@ async fn illegal_names_are_rejected_before_any_write() {
 async fn values_come_back_on_query_results() {
     let (manager, ns, _dir) = seeded().await;
     let results = manager
-        .query(&ns, unit_vector(0), None, 3, None, None, None, true, false)
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            3,
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+        )
         .await
         .expect("query")
         .results;
@@ -244,7 +266,18 @@ async fn values_come_back_on_query_results() {
 async fn a_vector_light_query_still_carries_attributes() {
     let (manager, ns, _dir) = seeded().await;
     let results = manager
-        .query(&ns, unit_vector(0), None, 3, None, None, None, false, false)
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            3,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        )
         .await
         .expect("query")
         .results;
@@ -370,7 +403,18 @@ async fn an_integer_written_to_a_float_column_is_widened() {
         .expect("an int is a legal float");
 
     let results = manager
-        .query(&ns, unit_vector(3), None, 1, None, None, None, false, false)
+        .query(
+            &ns,
+            unit_vector(3),
+            None,
+            1,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        )
         .await
         .expect("query")
         .results;

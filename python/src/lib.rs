@@ -392,6 +392,7 @@ fn op_search(
     filter: Option<String>,
     include_vectors: bool,
     exact: bool,
+    refine_factor: Option<u32>,
 ) -> PyResult<Vec<Hit>> {
     // An empty list is "no payload", not an empty vector — otherwise a
     // `vector=[]` would slip past the hybrid guard and silently degrade
@@ -425,6 +426,7 @@ fn op_search(
         include_vector: include_vectors,
         semantic_cache: None,
         exact,
+        refine_factor,
     };
     let service = service.clone();
     let fts = fts.clone();
@@ -512,7 +514,7 @@ impl Collection {
     }
 
     /// Search this collection. See `Client.search`.
-    #[pyo3(signature = (query=None, *, vector=None, vectors=None, hybrid=false, limit=10, tenant=None, filter=None, include_vectors=false, exact=false))]
+    #[pyo3(signature = (query=None, *, vector=None, vectors=None, hybrid=false, limit=10, tenant=None, filter=None, include_vectors=false, exact=false, refine_factor=None))]
     #[allow(clippy::too_many_arguments)]
     fn search(
         &self,
@@ -526,6 +528,7 @@ impl Collection {
         filter: Option<String>,
         include_vectors: bool,
         exact: bool,
+        refine_factor: Option<u32>,
     ) -> PyResult<Vec<Hit>> {
         self.lifecycle.check_open()?;
         let ns = compose_namespace(&self.collection, tenant.as_deref())?;
@@ -543,6 +546,7 @@ impl Collection {
             filter,
             include_vectors,
             exact,
+            refine_factor,
         )
     }
 }
@@ -631,7 +635,7 @@ impl Client {
     /// nearest-neighbour search; supplying both (or `hybrid=True`) runs
     /// hybrid (RRF) search. `tenant=` scopes to one tenant's namespace.
     /// Vectors are not echoed back on hits unless `include_vectors=True`.
-    #[pyo3(signature = (query=None, *, vector=None, vectors=None, hybrid=false, limit=10, tenant=None, filter=None, include_vectors=false, exact=false))]
+    #[pyo3(signature = (query=None, *, vector=None, vectors=None, hybrid=false, limit=10, tenant=None, filter=None, include_vectors=false, exact=false, refine_factor=None))]
     #[allow(clippy::too_many_arguments)]
     fn search(
         &self,
@@ -645,6 +649,7 @@ impl Client {
         filter: Option<String>,
         include_vectors: bool,
         exact: bool,
+        refine_factor: Option<u32>,
     ) -> PyResult<Vec<Hit>> {
         self.lifecycle.check_open()?;
         let ns = compose_namespace(DEFAULT_COLLECTION, tenant.as_deref())?;
@@ -662,6 +667,7 @@ impl Client {
             filter,
             include_vectors,
             exact,
+            refine_factor,
         )
     }
 

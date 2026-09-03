@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `refine_factor` on `POST /ns/{namespace}/query`: optional post-index refinement. When set to `N`, the server fetches `N * k` candidates from the IVF_PQ index then re-scores them against the original full-precision stored vectors, keeping the true top-k. Improves recall at the cost of more storage reads and higher latency. Cannot be combined with `exact: true` (returns 400). Participates in the exact result cache key. Refs #115.
+
 ## [0.9.6] - 2026-09-03
 
 ### Added

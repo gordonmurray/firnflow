@@ -53,7 +53,18 @@ async fn local_fs_upsert_query_roundtrip() {
     );
 
     let results = manager
-        .query(&ns, unit_vector(0), None, 3, None, None, None, true, false)
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            3,
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+        )
         .await
         .expect("local query");
 
@@ -178,7 +189,18 @@ async fn local_fs_query_filter_accepts_ingested_at_ranges() {
     manager.upsert(&ns, rows).await.expect("local upsert");
 
     let all = manager
-        .query(&ns, unit_vector(0), None, 2, None, None, None, false, false)
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            2,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+        )
         .await
         .expect("unfiltered query");
     let cutoff = all.results[0]
@@ -497,7 +519,7 @@ async fn local_fs_text_query_on_unwritten_namespace_is_empty_not_an_error() {
         ("vector-only", unit_vector(0), None),
     ] {
         let results = manager
-            .query(&ns, vector, None, 10, None, text, None, false, false)
+            .query(&ns, vector, None, 10, None, text, None, false, false, None)
             .await
             .unwrap_or_else(|e| panic!("{case} on an unwritten namespace must not error: {e}"));
         assert!(

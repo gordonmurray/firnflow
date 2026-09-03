@@ -124,6 +124,7 @@ async fn three_namespaces_with_different_dims() {
             None,
             true,
             false,
+            None,
         )
         .await
         .expect("query dim=4");
@@ -150,6 +151,7 @@ async fn three_namespaces_with_different_dims() {
             None,
             true,
             false,
+            None,
         )
         .await
         .expect("query dim=8");
@@ -175,6 +177,7 @@ async fn three_namespaces_with_different_dims() {
             None,
             true,
             false,
+            None,
         )
         .await
         .expect("query dim=16");
@@ -212,6 +215,7 @@ async fn three_namespaces_with_different_dims() {
             None,
             true,
             false,
+            None,
         )
         .await
         .expect_err("query dim=4 vector against dim=8 namespace must fail");

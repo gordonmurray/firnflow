@@ -93,16 +93,33 @@ pub struct QueryRequest {
     /// result sets to compute recall@k.
     ///
     /// Restricted to single-vector queries in v1 (no `vectors`, no
-    /// `text`). Setting `exact: true` with `nprobes`, on a multivector
-    /// query, or on a hybrid query all return 400. Exact queries always
-    /// run against the backend — both caches are bypassed in both
-    /// directions.
+    /// `text`). Setting `exact: true` with `nprobes` or `refine_factor`,
+    /// on a multivector query, or on a hybrid query all return 400.
+    /// Exact queries always run against the backend — both caches are
+    /// bypassed in both directions.
     ///
     /// Participates in the exact-cache key for forward-compatibility
     /// (exact queries currently bypass the cache entirely, but the key
     /// must differ from the indexed version if caching is ever added).
     #[serde(default)]
     pub exact: bool,
+    /// Post-index refinement factor. When set to `N`, the server fetches
+    /// `N * k` candidates from the IVF_PQ index and then re-scores them
+    /// against the original full-precision stored vectors, keeping the
+    /// true top-k from the re-scored set. Improves recall at the cost of
+    /// more storage reads: at `refine_factor: 5`, `k: 10`, and
+    /// 1024-dim vectors that is roughly 200 KiB of vector data read per
+    /// query on top of the index probe.
+    ///
+    /// Only meaningful for single-vector indexed queries — ignored if no
+    /// IVF_PQ index has been built. Mutually exclusive with `exact: true`
+    /// (which bypasses the index entirely). Must be `>= 1`; `1` is a
+    /// no-op but valid.
+    ///
+    /// Participates in the exact-cache key: a result refined at factor 5
+    /// and one at factor 2 are different payloads and must not collide.
+    #[serde(default)]
+    pub refine_factor: Option<u32>,
 }
 
 /// Per-request controls for opt-in semantic caching.
@@ -220,6 +237,13 @@ pub fn validate_exact_query_request(req: &QueryRequest) -> Result<(), crate::Fir
         return Err(crate::FirnflowError::InvalidRequest(
             "`exact: true` and `nprobes` cannot be set together; \
              they describe different execution plans"
+                .into(),
+        ));
+    }
+    if req.refine_factor.is_some() {
+        return Err(crate::FirnflowError::InvalidRequest(
+            "`exact: true` and `refine_factor` cannot be set together; \
+             exact mode bypasses the index so there are no candidates to refine"
                 .into(),
         ));
     }
@@ -377,6 +401,7 @@ mod tests {
             include_vector: true,
             semantic_cache: None,
             exact: false,
+            refine_factor: None,
         }
     }
 
@@ -561,5 +586,26 @@ mod tests {
             }
             other => panic!("expected InvalidRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn exact_with_refine_factor_is_rejected() {
+        let mut req = req_vector_only();
+        req.exact = true;
+        req.refine_factor = Some(5);
+        let err = validate_exact_query_request(&req).unwrap_err();
+        match err {
+            FirnflowError::InvalidRequest(msg) => {
+                assert!(msg.contains("refine_factor"), "{msg}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refine_factor_without_exact_is_valid() {
+        let mut req = req_vector_only();
+        req.refine_factor = Some(5);
+        assert!(validate_exact_query_request(&req).is_ok());
     }
 }

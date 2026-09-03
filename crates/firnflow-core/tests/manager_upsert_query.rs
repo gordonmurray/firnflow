@@ -82,7 +82,18 @@ async fn upsert_then_query_returns_nearest_neighbor() {
     // Query with the exact stored vector for id=1. It must come back
     // as the top hit with ~zero distance.
     let results = manager
-        .query(&ns, unit_vector(0), None, 3, None, None, None, true, false)
+        .query(
+            &ns,
+            unit_vector(0),
+            None,
+            3,
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+        )
         .await
         .expect("query");
 
