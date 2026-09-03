@@ -309,6 +309,7 @@ async fn import_carries_declared_attribute_values() {
             Some("section = 'dosage'".into()),
             true,
             false,
+            None,
         )
         .await
         .expect("filtered query")

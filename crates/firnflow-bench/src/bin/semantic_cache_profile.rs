@@ -390,6 +390,7 @@ fn vector_query(
             min_similarity: Some(threshold),
         }),
         exact: false,
+        refine_factor: None,
     }
 }
 

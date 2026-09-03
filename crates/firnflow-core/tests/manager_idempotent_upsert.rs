@@ -293,6 +293,7 @@ async fn multivector_reupsert_replaces_not_appends() {
             None,
             true,
             false,
+            None,
         )
         .await
         .expect("multivector query")

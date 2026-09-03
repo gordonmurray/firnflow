@@ -326,6 +326,7 @@ async fn main() -> anyhow::Result<()> {
             include_vector: true,
             semantic_cache: None,
             exact: false,
+            refine_factor: None,
         })
         .collect();
 
@@ -340,6 +341,7 @@ async fn main() -> anyhow::Result<()> {
             include_vector: true,
             semantic_cache: None,
             exact: false,
+            refine_factor: None,
         })
         .collect();
 

@@ -119,6 +119,7 @@ async fn service_cache_aside_follows_table_version() {
         include_vector: true,
         semantic_cache: None,
         exact: false,
+        refine_factor: None,
     };
 
     // ---- 1. upsert via service: two rows ----
@@ -249,6 +250,7 @@ async fn delete_recreate_does_not_serve_old_incarnation() {
         include_vector: true,
         semantic_cache: None,
         exact: false,
+        refine_factor: None,
     };
 
     // --- Incarnation A: one row, then cache the query result. ---
