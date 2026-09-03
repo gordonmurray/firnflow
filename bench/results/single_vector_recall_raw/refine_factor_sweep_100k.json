@@ -1,0 +1,32 @@
+[
+  {
+    "refine_factor": 5,
+    "nprobes": 20,
+    "recall@10": 0.953,
+    "queries": 200,
+    "p50_ms": 40.94,
+    "p95_ms": 53.67,
+    "p99_ms": 56.95,
+    "cache_hits": 0
+  },
+  {
+    "refine_factor": 10,
+    "nprobes": 20,
+    "recall@10": 0.99,
+    "queries": 200,
+    "p50_ms": 53.62,
+    "p95_ms": 69.41,
+    "p99_ms": 80.92,
+    "cache_hits": 0
+  },
+  {
+    "refine_factor": 20,
+    "nprobes": 20,
+    "recall@10": 0.9985,
+    "queries": 200,
+    "p50_ms": 73.62,
+    "p95_ms": 93.49,
+    "p99_ms": 102.41,
+    "cache_hits": 0
+  }
+]
