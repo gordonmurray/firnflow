@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-09-03
+
 ### Added
 
 - `refine_factor` on `POST /ns/{namespace}/query`: optional post-index refinement. When set to `N`, the server fetches `N * k` candidates from the IVF_PQ index then re-scores them against the original full-precision stored vectors, keeping the true top-k. Improves recall at the cost of more storage reads and higher latency. Cannot be combined with `exact: true` (returns 400). Participates in the exact result cache key. Refs #115.
+- The Python package `search()` call gains a `refine_factor` keyword argument (`refine_factor=N`, default `None`). Ships as `firn 0.2.3`.
 
 ## [0.9.6] - 2026-09-03
 
@@ -261,7 +264,8 @@ development through phases 1 through 8 before being made public;
   benchmark at dim=1536, 100k rows available at
   `bench/results/cold_vs_warm_aws.md`.
 
-[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.9.6...HEAD
+[Unreleased]: https://github.com/gordonmurray/firnflow/compare/v0.9.7...HEAD
+[0.9.7]: https://github.com/gordonmurray/firnflow/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/gordonmurray/firnflow/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/gordonmurray/firnflow/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/gordonmurray/firnflow/compare/v0.9.3...v0.9.4

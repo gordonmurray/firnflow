@@ -3,7 +3,7 @@ name = "firnflow-python"
 # `version` stays literal: the package releases on its own `firn-v*`
 # tag scheme, independently of the server. The toolchain floor is not
 # package-specific, so inherit it and let it track the workspace.
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 rust-version.workspace = true
 license = "Apache-2.0"

@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.9.6"
+version = "0.9.7"
 edition = "2024"
 # The 2024 edition itself only needs 1.85, but the exact-pinned
 # lance 6.0.0 / lancedb 0.29.0 line requires 1.91, so that is the
