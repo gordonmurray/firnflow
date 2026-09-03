@@ -224,6 +224,26 @@ a machine-readable environment record.
 - Runs on different hardware are not latency comparisons. The recall
   figures within each run are.
 
+## refine_factor recall improvement (2026-09-03)
+
+- **Firn version**: v0.9.7
+- **Setup**: shard 0 corpus (100,000 rows), shard 1 query vectors (200 queries), k=10, nprobes=20, one index build
+- **Note**: different query shard from the validated runs above (those used shard 10). The baseline here is one build and cannot be averaged with the 0.5880-0.5935 range. The refine_factor columns are the new measurement.
+- **Raw data**: [`single_vector_recall_raw/refine_factor_sweep_100k.json`](single_vector_recall_raw/refine_factor_sweep_100k.json), [`single_vector_recall_raw/refine_factor_baseline_100k.json`](single_vector_recall_raw/refine_factor_baseline_100k.json)
+
+`refine_factor` was added in v0.9.7. After the IVF_PQ search the server fetches `refine_factor * k` candidates, re-scores them against the full stored vectors, and returns the true top-k from that re-scored set. At 100,000 rows with 12 partitions and nprobes=20, the index already searches every partition, so every row is a candidate. The remaining recall gap is in the PQ scoring step. Re-scoring against full-precision vectors closes most of it.
+
+| refine_factor | Recall@10 | p50 ms | p95 ms | queries | cache_hits |
+| ------------: | --------: | -----: | -----: | ------: | ---------: |
+| 0 (baseline)  |     0.637 |  21.11 |  25.97 |     200 |          0 |
+| 5             |     0.953 |  40.94 |  53.67 |     200 |          0 |
+| 10            |     0.990 |  53.62 |  69.41 |     200 |          0 |
+| 20            |    0.9985 |  73.62 |  93.49 |     200 |          0 |
+
+`refine_factor=10` takes recall from 0.637 to 0.990 at roughly 2.5x the query latency. `refine_factor=20` reaches 0.9985 at 3.5x. The baseline of 0.637 is from a single build with a different query shard; the validated range of 0.5880-0.5935 from three builds earlier in this file is the more reliable baseline figure for IVF_PQ-only recall.
+
+The harness script for this sweep is [`bench/recall/refine_factor_sweep.py`](../recall/refine_factor_sweep.py). It accepts a comma-separated list of refine_factor values and follows the same cache-hit rejection and response-integrity checks as `recall_sweep.py`.
+
 ## Reproducing
 
 [`bench/recall/README.md`](../recall/README.md) has the full procedure:

@@ -259,7 +259,7 @@ Firn is not intended to replace every search platform. OpenSearch and Elasticsea
 - `/import` is insert-only; use `/upsert` for idempotent updates.
 - Metadata columns are scalars: `string`, `int`, `float`, and `bool`. Lists, nested objects, and timestamps are not modelled, and neither are facet counts over a filtered set.
 - Per-row deletion is not yet part of the current API.
-- An IVF_PQ index is recommended for practical cold-query latency on large object-storage-backed namespaces; exact search remains available when recall matters more than latency.
+- An IVF_PQ index is recommended for practical cold-query latency on large object-storage-backed namespaces; exact search remains available when recall matters more than latency. For cases where IVF_PQ recall is too low but exact search is too slow, add `refine_factor` to the query: the server fetches `refine_factor * k` candidates from the index and re-scores them against the full stored vectors. On a 100k Wikipedia vector corpus, default IVF_PQ gives 0.59-0.64 Recall@10; `refine_factor=10` reaches 0.990 at roughly 2.5x the query latency.
 
 ## Authentication
 
