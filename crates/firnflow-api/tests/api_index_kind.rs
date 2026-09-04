@@ -58,6 +58,30 @@ async fn unknown_kind_returns_400_synchronously() {
 }
 
 #[tokio::test]
+async fn ivf_rq_num_bits_out_of_range_returns_400_synchronously() {
+    let (state, _tmp) = test_state_offline().await;
+    let app = router(state);
+    let ns = unique_namespace("index-rq-bits");
+
+    let (status, response) = post_json(
+        app,
+        format!("/ns/{ns}/index"),
+        json!({ "kind": "ivf_rq", "num_bits": 256 }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "ivf_rq with out-of-range num_bits must reject synchronously: {response}"
+    );
+    let msg = response["error"].as_str().expect("error message");
+    assert!(
+        msg.contains("num_bits") && msg.contains("256"),
+        "error must name the field and the bad value: {msg}"
+    );
+}
+
+#[tokio::test]
 async fn ivf_rq_with_num_sub_vectors_returns_400_synchronously() {
     let (state, _tmp) = test_state_offline().await;
     let app = router(state);

@@ -465,6 +465,15 @@ pub async fn create_index(
                     ),
                 ));
             }
+            if let Some(b) = req.num_bits
+                && !(1..=8).contains(&b)
+            {
+                return Err(ApiError::Core(
+                    firnflow_core::FirnflowError::InvalidRequest(format!(
+                        "ivf_rq num_bits must be between 1 and 8, got {b}"
+                    )),
+                ));
+            }
         }
         other => {
             return Err(ApiError::Core(
