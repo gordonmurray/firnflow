@@ -50,7 +50,7 @@ use lance::dataset::scanner::ColumnOrdering;
 use lance::dataset::{WriteMode, WriteParams};
 use lancedb::DistanceType;
 use lancedb::index::scalar::{BTreeIndexBuilder, FtsIndexBuilder, FullTextSearchQuery};
-use lancedb::index::vector::IvfPqIndexBuilder;
+use lancedb::index::vector::{IvfPqIndexBuilder, IvfRqIndexBuilder};
 use lancedb::index::{Index, IndexType};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::{NewColumnTransform, OptimizeAction, WriteOptions};
@@ -1535,21 +1535,53 @@ impl NamespaceManager {
     pub async fn create_index(
         &self,
         ns: &NamespaceId,
+        kind: &str,
         num_partitions: Option<u32>,
         num_sub_vectors: Option<u32>,
         num_bits: Option<u32>,
     ) -> Result<(), FirnflowError> {
-        // Reject unsupported PQ tuning combinations before any I/O
-        // so direct callers (benches, integration tests) bypassing
-        // the API handler still get a synchronous error rather than
-        // a deferred Lance failure.
-        crate::query::validate_ivf_pq_options(num_bits, num_sub_vectors)?;
+        // Validate kind and option compatibility before any I/O so direct
+        // callers bypassing the API handler still get a synchronous error
+        // rather than a deferred Lance failure.
+        match kind {
+            "ivf_pq" => {
+                crate::query::validate_ivf_pq_options(num_bits, num_sub_vectors)?;
+            }
+            "ivf_rq" => {
+                if num_sub_vectors.is_some() {
+                    return Err(FirnflowError::InvalidRequest(
+                        "num_sub_vectors is not used by ivf_rq; omit it or remove it from the request".into(),
+                    ));
+                }
+                if let Some(b) = num_bits
+                    && !(1..=8).contains(&b)
+                {
+                    return Err(FirnflowError::InvalidRequest(format!(
+                        "ivf_rq num_bits must be between 1 and 8, got {b}"
+                    )));
+                }
+            }
+            other => {
+                return Err(FirnflowError::InvalidRequest(format!(
+                    "unsupported index kind {other:?}; valid values are \"ivf_pq\" and \"ivf_rq\""
+                )));
+            }
+        }
 
         let info = self.resolve_schema_info(ns).await?.ok_or_else(|| {
             FirnflowError::InvalidRequest(format!(
                 "cannot index namespace {ns}: no data has been upserted yet"
             ))
         })?;
+
+        // Lance 6 requires the vector dimension to be divisible by 8 for IVF_RQ.
+        // Check early so the caller gets a clear 400 instead of a backend error.
+        if kind == "ivf_rq" && info.dim % 8 != 0 {
+            return Err(FirnflowError::InvalidRequest(format!(
+                "ivf_rq requires vector dimension divisible by 8; namespace {ns} has dim {}",
+                info.dim
+            )));
+        }
 
         let tbl = self.get_or_open_table(ns, info.kind, info.dim).await?;
 
@@ -1564,18 +1596,35 @@ impl NamespaceManager {
             VectorKind::Single => DistanceType::L2,
             VectorKind::Multivector => DistanceType::Cosine,
         };
-        let mut builder = IvfPqIndexBuilder::default().distance_type(metric);
-        if let Some(n) = num_partitions {
-            builder = builder.num_partitions(n);
-        }
-        if let Some(m) = num_sub_vectors {
-            builder = builder.num_sub_vectors(m);
-        }
-        if let Some(b) = num_bits {
-            builder = builder.num_bits(b);
-        }
 
-        tbl.create_index(&["vector"], Index::IvfPq(builder))
+        let index = match kind {
+            "ivf_pq" => {
+                let mut builder = IvfPqIndexBuilder::default().distance_type(metric);
+                if let Some(n) = num_partitions {
+                    builder = builder.num_partitions(n);
+                }
+                if let Some(m) = num_sub_vectors {
+                    builder = builder.num_sub_vectors(m);
+                }
+                if let Some(b) = num_bits {
+                    builder = builder.num_bits(b);
+                }
+                Index::IvfPq(builder)
+            }
+            "ivf_rq" => {
+                let mut builder = IvfRqIndexBuilder::default().distance_type(metric);
+                if let Some(n) = num_partitions {
+                    builder = builder.num_partitions(n);
+                }
+                if let Some(b) = num_bits {
+                    builder = builder.num_bits(b);
+                }
+                Index::IvfRq(builder)
+            }
+            _ => unreachable!("kind validated above"),
+        };
+
+        tbl.create_index(&["vector"], index)
             .execute()
             .await
             .map_err(|e| FirnflowError::Backend(format!("create_index: {e}")))?;

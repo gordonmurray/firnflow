@@ -448,22 +448,41 @@ pub async fn create_index(
 ) -> Result<(StatusCode, Json<OperationAccepted>), ApiError> {
     let ns = NamespaceId::new(namespace)?;
 
-    if req.kind != "ivf_pq" {
-        return Err(ApiError::Core(
-            firnflow_core::FirnflowError::InvalidRequest(format!(
-                "unsupported index kind {:?}, only \"ivf_pq\" is supported",
-                req.kind
-            )),
-        ));
+    match req.kind.as_str() {
+        "ivf_pq" => {
+            // Validate PQ-specific options synchronously so a bad payload
+            // returns 400 rather than a misleading 202 followed by a
+            // log-only failure. The manager repeats this check for direct
+            // callers that bypass the handler.
+            firnflow_core::validate_ivf_pq_options(req.num_bits, req.num_sub_vectors)
+                .map_err(ApiError::Core)?;
+        }
+        "ivf_rq" => {
+            if req.num_sub_vectors.is_some() {
+                return Err(ApiError::Core(
+                    firnflow_core::FirnflowError::InvalidRequest(
+                        "num_sub_vectors is not used by ivf_rq; omit it or remove it from the request".into(),
+                    ),
+                ));
+            }
+            if let Some(b) = req.num_bits
+                && !(1..=8).contains(&b)
+            {
+                return Err(ApiError::Core(
+                    firnflow_core::FirnflowError::InvalidRequest(format!(
+                        "ivf_rq num_bits must be between 1 and 8, got {b}"
+                    )),
+                ));
+            }
+        }
+        other => {
+            return Err(ApiError::Core(
+                firnflow_core::FirnflowError::InvalidRequest(format!(
+                    "unsupported index kind {other:?}; valid values are \"ivf_pq\" and \"ivf_rq\""
+                )),
+            ));
+        }
     }
-
-    // Validate PQ tuning options synchronously, before spawning the
-    // background task. The manager performs the same check itself
-    // (so direct callers stay protected), but doing it here as well
-    // means a bad payload returns 400 instead of a misleading 202
-    // followed by a log-only failure.
-    firnflow_core::validate_ivf_pq_options(req.num_bits, req.num_sub_vectors)
-        .map_err(ApiError::Core)?;
 
     let operation_id = state.operations.start(OperationKind::Index, ns.to_string());
 
@@ -471,10 +490,12 @@ pub async fn create_index(
     let operations = Arc::clone(&state.operations);
     let ns_owned = ns.clone();
     let op_for_task = operation_id.clone();
+    let kind = req.kind.clone();
     tokio::spawn(async move {
         match service
             .create_index(
                 &ns_owned,
+                &kind,
                 req.num_partitions,
                 req.num_sub_vectors,
                 req.num_bits,

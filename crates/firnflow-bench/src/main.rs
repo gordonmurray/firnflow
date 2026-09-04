@@ -395,6 +395,7 @@ async fn main() -> anyhow::Result<()> {
     service
         .create_index(
             &ns_indexed,
+            "ivf_pq",
             Some(num_partitions),
             Some(num_sub_vectors),
             None,

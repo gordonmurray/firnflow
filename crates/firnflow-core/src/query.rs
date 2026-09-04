@@ -283,21 +283,29 @@ pub fn effective_semantic_threshold(req: &SemanticCacheRequest) -> f32 {
 /// Parameters for an explicit index build request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexRequest {
-    /// Index type. Currently only `"ivf_pq"` is supported.
+    /// Index type: `"ivf_pq"` (default) or `"ivf_rq"` (RaBitQ quantization).
+    ///
+    /// `"ivf_rq"` replaces product quantization with a random-rotation-based
+    /// quantizer. It supports 1-8 bits per dimension via `num_bits` and
+    /// does not use `num_sub_vectors` (rejected with 400 if supplied).
     #[serde(default = "default_index_kind")]
     pub kind: String,
     /// Number of IVF partitions. Defaults to `sqrt(row_count)` if
     /// omitted.
     pub num_partitions: Option<u32>,
     /// Number of PQ sub-vectors. Defaults to `dim / 16` if omitted.
+    /// Rejected with 400 when `kind` is `"ivf_rq"`.
     pub num_sub_vectors: Option<u32>,
-    /// PQ codebook bit width. `Some(4)` halves the per-vector index
-    /// storage cost relative to the 8-bit default at the cost of
-    /// some recall. Accepted values are 4 or 8; omitting keeps
-    /// Lance's 8-bit default.
+    /// Quantizer bit width.
     ///
-    /// `Some(4)` additionally requires `num_sub_vectors` to be even
-    /// (Lance 6 rejects 4-bit PQ over an odd sub-vector count).
+    /// For `"ivf_pq"`: accepted values are 4 or 8; `Some(4)` halves
+    /// per-vector index storage at the cost of some recall and requires
+    /// `num_sub_vectors` to be even (Lance 6 rejects 4-bit PQ over an odd
+    /// sub-vector count). Omitting keeps Lance's 8-bit default.
+    ///
+    /// For `"ivf_rq"`: accepted values are 1-8 bits per dimension.
+    /// Higher values give better recall; 5 bits is the recommended
+    /// high-recall setting. Omitting lets Lance choose its default.
     #[serde(default)]
     pub num_bits: Option<u32>,
 }
