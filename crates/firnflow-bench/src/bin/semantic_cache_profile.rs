@@ -767,7 +767,13 @@ async fn main() -> anyhow::Result<()> {
     let index_start = Instant::now();
     setup
         .service
-        .create_index(&ns, Some(num_partitions), Some(num_sub_vectors), None)
+        .create_index(
+            &ns,
+            "ivf_pq",
+            Some(num_partitions),
+            Some(num_sub_vectors),
+            None,
+        )
         .await?;
     let index_elapsed = index_start.elapsed();
     println!("  completed in {:.1}s", index_elapsed.as_secs_f64());

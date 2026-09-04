@@ -201,7 +201,7 @@ async fn upsert_then_query_returns_multivector_hits() {
     // Assert only that the indexed path stays wired: it returns hits and
     // still omits the bag.
     manager
-        .create_index(&ns, Some(4), Some(2), None)
+        .create_index(&ns, "ivf_pq", Some(4), Some(2), None)
         .await
         .expect("index build");
 
@@ -389,7 +389,7 @@ async fn create_index_forces_cosine_on_multivector() {
     // would reject a non-cosine metric at build time with
     // "multivector type supports only cosine distance".
     manager
-        .create_index(&ns, Some(4), Some(1), None)
+        .create_index(&ns, "ivf_pq", Some(4), Some(1), None)
         .await
         .expect("multivector index build under forced cosine");
 

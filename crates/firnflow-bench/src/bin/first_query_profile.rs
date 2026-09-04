@@ -746,6 +746,7 @@ async fn ensure_seeded(cfg: &Config) -> anyhow::Result<SeedSummary> {
         // num_bits=None ⇒ default 8-bit PQ (the 4-bit path is opt-in).
         .create_index(
             &cfg.namespace,
+            "ivf_pq",
             Some(num_partitions),
             Some(num_sub_vectors),
             None,

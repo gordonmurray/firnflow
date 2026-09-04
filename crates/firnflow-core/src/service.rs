@@ -483,6 +483,7 @@ impl NamespaceService {
     pub async fn create_index(
         &self,
         ns: &NamespaceId,
+        kind: &str,
         num_partitions: Option<u32>,
         num_sub_vectors: Option<u32>,
         num_bits: Option<u32>,
@@ -490,10 +491,10 @@ impl NamespaceService {
         let start = Instant::now();
         self.metrics.record_s3_request(ns, "index");
         self.manager
-            .create_index(ns, num_partitions, num_sub_vectors, num_bits)
+            .create_index(ns, kind, num_partitions, num_sub_vectors, num_bits)
             .await?;
         self.metrics
-            .record_index_build(ns, "ivf_pq", start.elapsed().as_secs_f64());
+            .record_index_build(ns, kind, start.elapsed().as_secs_f64());
         Ok(())
     }
 

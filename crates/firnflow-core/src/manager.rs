@@ -50,7 +50,7 @@ use lance::dataset::scanner::ColumnOrdering;
 use lance::dataset::{WriteMode, WriteParams};
 use lancedb::DistanceType;
 use lancedb::index::scalar::{BTreeIndexBuilder, FtsIndexBuilder, FullTextSearchQuery};
-use lancedb::index::vector::IvfPqIndexBuilder;
+use lancedb::index::vector::{IvfPqIndexBuilder, IvfRqIndexBuilder};
 use lancedb::index::{Index, IndexType};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::{NewColumnTransform, OptimizeAction, WriteOptions};
@@ -1535,16 +1535,11 @@ impl NamespaceManager {
     pub async fn create_index(
         &self,
         ns: &NamespaceId,
+        kind: &str,
         num_partitions: Option<u32>,
         num_sub_vectors: Option<u32>,
         num_bits: Option<u32>,
     ) -> Result<(), FirnflowError> {
-        // Reject unsupported PQ tuning combinations before any I/O
-        // so direct callers (benches, integration tests) bypassing
-        // the API handler still get a synchronous error rather than
-        // a deferred Lance failure.
-        crate::query::validate_ivf_pq_options(num_bits, num_sub_vectors)?;
-
         let info = self.resolve_schema_info(ns).await?.ok_or_else(|| {
             FirnflowError::InvalidRequest(format!(
                 "cannot index namespace {ns}: no data has been upserted yet"
@@ -1564,18 +1559,48 @@ impl NamespaceManager {
             VectorKind::Single => DistanceType::L2,
             VectorKind::Multivector => DistanceType::Cosine,
         };
-        let mut builder = IvfPqIndexBuilder::default().distance_type(metric);
-        if let Some(n) = num_partitions {
-            builder = builder.num_partitions(n);
-        }
-        if let Some(m) = num_sub_vectors {
-            builder = builder.num_sub_vectors(m);
-        }
-        if let Some(b) = num_bits {
-            builder = builder.num_bits(b);
-        }
 
-        tbl.create_index(&["vector"], Index::IvfPq(builder))
+        let index = match kind {
+            "ivf_pq" => {
+                // Validate PQ-specific constraints before any I/O so direct
+                // callers bypassing the API handler still get a synchronous
+                // error rather than a deferred Lance failure.
+                crate::query::validate_ivf_pq_options(num_bits, num_sub_vectors)?;
+                let mut builder = IvfPqIndexBuilder::default().distance_type(metric);
+                if let Some(n) = num_partitions {
+                    builder = builder.num_partitions(n);
+                }
+                if let Some(m) = num_sub_vectors {
+                    builder = builder.num_sub_vectors(m);
+                }
+                if let Some(b) = num_bits {
+                    builder = builder.num_bits(b);
+                }
+                Index::IvfPq(builder)
+            }
+            "ivf_rq" => {
+                if num_sub_vectors.is_some() {
+                    return Err(FirnflowError::InvalidRequest(
+                        "num_sub_vectors is not used by ivf_rq; omit it or remove it from the request".into(),
+                    ));
+                }
+                let mut builder = IvfRqIndexBuilder::default().distance_type(metric);
+                if let Some(n) = num_partitions {
+                    builder = builder.num_partitions(n);
+                }
+                if let Some(b) = num_bits {
+                    builder = builder.num_bits(b);
+                }
+                Index::IvfRq(builder)
+            }
+            other => {
+                return Err(FirnflowError::InvalidRequest(format!(
+                    "unsupported index kind {other:?}; valid values are \"ivf_pq\" and \"ivf_rq\""
+                )));
+            }
+        };
+
+        tbl.create_index(&["vector"], index)
             .execute()
             .await
             .map_err(|e| FirnflowError::Backend(format!("create_index: {e}")))?;
