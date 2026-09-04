@@ -7,9 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- `POST /ns/{namespace}/index` accepts `kind: "ivf_rq"`, selecting RaBitQ quantization as an alternative to the existing `ivf_pq` default. RaBitQ scores candidates using a random-rotation-based quantizer rather than product quantization, which closes the recall gap that persists at low `nprobes` on PQ-indexed namespaces. `num_bits` is 1-8 bits per dimension (5 is the recommended starting point). `num_sub_vectors` has no meaning without sub-vector decomposition and is rejected with 400 when `kind` is `"ivf_rq"`. `num_bits` outside 1-8 is also rejected with 400 (Lance accepts the value as `u8`, so out-of-range values truncate silently and produce undefined behaviour during quantization). Lance 6 requires vector dimension divisible by 8 for IVF_RQ; passing an incompatible namespace returns a 400 naming the actual dimension rather than a backend error. No version bump to lancedb or lance is required: `IvfRqIndexBuilder` is available in the current `lancedb 0.29.0` / `lance 6.0.0` pins. The `firnflow_index_build_duration_seconds` metric label now reflects the actual index kind; it was previously hardcoded to `"ivf_pq"` regardless of which index was built. Closes #118.
-
 ## [0.9.7] - 2026-09-03
 
 ### Added

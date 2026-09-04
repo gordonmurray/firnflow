@@ -615,16 +615,16 @@ curl -X POST http://localhost:3000/ns/demo/import \
         <span class="endpoint-desc">Build an ANN vector index (async)</span>
       </div>
       <div class="endpoint-body">
-        <p>Builds a vector index on the namespace's vector column. Returns <code>202 Accepted</code> and builds in the background. Building an index dramatically reduces cold query latency (25x speedup on AWS S3). Two index types are available: <code>ivf_pq</code> (Inverted File with Product Quantisation, the default) and <code>ivf_rq</code> (Inverted File with RaBitQ quantization, higher recall per bit at the cost of slightly larger index storage).</p>
+        <p>Builds an IVF_PQ (Inverted File with Product Quantisation) index on the namespace's vector column. Returns <code>202 Accepted</code> and builds in the background. Building an index dramatically reduces cold query latency (25x speedup on AWS S3).</p>
 
         <h4>Request body</h4>
         <table>
           <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Default</th><th>Description</th></tr></thead>
           <tbody>
-            <tr><td><code>kind</code></td><td>string</td><td>Yes</td><td>-</td><td>Index type. <code>"ivf_pq"</code> (Product Quantization) or <code>"ivf_rq"</code> (RaBitQ quantization). IVF_RQ produces higher recall for the same number of bits; IVF_PQ is the established default.</td></tr>
-            <tr><td><code>num_partitions</code></td><td>u32</td><td>No</td><td>sqrt(row_count)</td><td>Number of IVF partitions. Applies to both index types.</td></tr>
-            <tr><td><code>num_sub_vectors</code></td><td>u32</td><td>No</td><td>dim / 16</td><td>IVF_PQ only. Number of PQ sub-vectors (must divide dimension evenly). Rejected with 400 for <code>ivf_rq</code>.</td></tr>
-            <tr><td><code>num_bits</code></td><td>u32</td><td>No</td><td>8</td><td>For <code>ivf_pq</code>: codebook bit width, 4 or 8. 4-bit halves index storage at some recall cost and requires <code>num_sub_vectors</code> to be even. For <code>ivf_rq</code>: bits per dimension, 1-8 (5 is the recommended starting point for high recall).</td></tr>
+            <tr><td><code>kind</code></td><td>string</td><td>Yes</td><td>-</td><td>Index type. Only <code>"ivf_pq"</code> is supported.</td></tr>
+            <tr><td><code>num_partitions</code></td><td>u32</td><td>No</td><td>sqrt(row_count)</td><td>Number of IVF partitions</td></tr>
+            <tr><td><code>num_sub_vectors</code></td><td>u32</td><td>No</td><td>dim / 16</td><td>Number of PQ sub-vectors (must divide dimension evenly)</td></tr>
+            <tr><td><code>num_bits</code></td><td>u32</td><td>No</td><td>8</td><td>PQ codebook bit width. Accepted values: 4 or 8. Setting 4 halves the per-vector index storage cost at the cost of some recall; 4-bit additionally requires <code>num_sub_vectors</code> to be even.</td></tr>
           </tbody>
         </table>
 

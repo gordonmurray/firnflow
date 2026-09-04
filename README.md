@@ -259,7 +259,7 @@ Firn is not intended to replace every search platform. OpenSearch and Elasticsea
 - `/import` is insert-only; use `/upsert` for idempotent updates.
 - Metadata columns are scalars: `string`, `int`, `float`, and `bool`. Lists, nested objects, and timestamps are not modelled, and neither are facet counts over a filtered set.
 - Per-row deletion is not yet part of the current API.
-- A vector index is recommended for practical cold-query latency on large object-storage-backed namespaces. Two index types are available: `ivf_pq` (default) and `ivf_rq` (RaBitQ quantization, better recall per bit). Exact search remains available when recall matters more than latency.
+- An IVF_PQ index is recommended for practical cold-query latency on large object-storage-backed namespaces; exact search remains available when recall matters more than latency.
 
 ## Authentication
 
@@ -291,7 +291,7 @@ If `FIRNFLOW_ADMIN_API_KEY` is unset, the read/write key authorises admin routes
 | `/ns/{ns}/query` | `POST` | read/write | Vector, FTS, or hybrid search |
 | `/ns/{ns}/list` | `GET` | read/write | Cursor-paginated list ordered by `_ingested_at` |
 | `/ns/{ns}/warmup` | `POST` | read/write | Non-blocking cache pre-warm hint |
-| `/ns/{ns}/index` | `POST` | admin | Build a vector index (`ivf_pq` or `ivf_rq`, async, returns 202) |
+| `/ns/{ns}/index` | `POST` | admin | Build IVF_PQ vector index (async, returns 202) |
 | `/ns/{ns}/fts-index` | `POST` | admin | Build BM25 full-text search index (async, returns 202) |
 | `/ns/{ns}/scalar-index` | `POST` | admin | Build a BTree index on a column (async, returns 202). Optional body `{"column": "id"}` for write-path merge-insert lookups, or a declared metadata column to speed up filters over it; defaults to `_ingested_at` to accelerate `/list` |
 | `/ns/{ns}/compact` | `POST` | admin | Compact and prune data files (async, returns 202) |
@@ -405,9 +405,9 @@ The handler returns 400 if the payload shape does not match the namespace's kind
 
 **Constraints to know before adopting multivector:**
 
-- **Cosine only.** Lance's late-interaction index supports cosine distance exclusively. Firn does not expose a per-request metric option on the API surface; the index builder uses cosine internally for multivector namespaces and L2 for single-vector namespaces.
+- **Cosine only.** Lance's late-interaction index supports cosine distance exclusively. Firn does not expose a per-request metric option on the API surface; `create_index` constructs the IVF_PQ builder with cosine internally for multivector namespaces and with L2 for single-vector namespaces.
 - **Storage is materially larger.** A single-vector CLIP entry is ~2 KB per row. A multivector ColPali entry is closer to ~500 KB per row (around 1030 sub-vectors × 128 floats). Budget S3 footprint and index-build wall-clock time accordingly.
-- **Build an index for tractable latency.** Lance answers multivector queries on an un-indexed namespace via brute-force scan, fine for tiny development corpora but painfully slow on anything real. Build an index (`POST /ns/{ns}/index`) after the first batch of upserts. Same trade-off as single-vector queries.
+- **Build an index for tractable latency.** Lance answers multivector queries on an un-indexed namespace via brute-force scan, fine for tiny development corpora but painfully slow on anything real. Build the IVF_PQ index (`POST /ns/{ns}/index`) after the first batch of upserts. Same trade-off as single-vector queries.
 - **The result cache does not accelerate novel multivector queries.** Every tokenised query is unique, so result-cache hit rate is near zero here; it still accelerates exact repeats (useful for benchmarks, not production retrieval). The object cache, if enabled, still helps by serving the underlying byte reads from NVMe.
 - **New-namespace only.** A namespace that started as single-vector cannot be converted to multivector in place. Create a new namespace with a multivector first upsert.
 
